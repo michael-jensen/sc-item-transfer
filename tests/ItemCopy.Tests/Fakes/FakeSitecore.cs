@@ -48,6 +48,9 @@ public sealed class FakeSitecore : HttpMessageHandler
     /// <summary>Location header ends with the blob name (per the endpoint reference) instead of the transfer ID.</summary>
     public bool LocationIsBlobName { get; set; }
     public HashSet<string> LoadFailsOnce { get; } = [];
+    public HashSet<string> LoadNeverFinishes { get; } = [];
+    /// <summary>Paths whose load request is refused with 400.</summary>
+    public HashSet<string> ConsumeRejects { get; } = [];
     public Dictionary<string, List<string>> LoadValidationErrors { get; } = [];
 
     // ---- Observed state ----
@@ -266,6 +269,8 @@ public sealed class FakeSitecore : HttpMessageHandler
             var blobName = query["blobName"]!;
             if (!Blobs.TryGetValue(blobName, out var blob) || blob.State != "Uploaded")
                 return Json(HttpStatusCode.BadRequest, new { Error = "Blob not ready" });
+            if (ConsumeRejects.Contains(blob.Path))
+                return Json(HttpStatusCode.BadRequest, new { Error = "Database is read-only" });
 
             blob.State = "Consumed";
             var id = NewItemTransfer(blobName, blob.Path);
@@ -313,7 +318,7 @@ public sealed class FakeSitecore : HttpMessageHandler
             if (!ItemTransfers.TryGetValue(id, out var t))
                 return Json(HttpStatusCode.NotFound, new { Error = "Transfer not found" });
 
-            if (t.State == "InProgress" && ++t.Polls > 1)
+            if (t.State == "InProgress" && ++t.Polls > 1 && !LoadNeverFinishes.Contains(t.Path))
             {
                 if (LoadFailsOnce.Contains(t.Path) && !t.Retried)
                 {

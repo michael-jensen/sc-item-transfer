@@ -242,8 +242,11 @@ A **partial** item does not stop the run.
 
 **Ctrl+C.** Cancels in-flight work, then best-effort deletes all source
 transfers this run created. Blobs already generated are listed in the summary.
+A load the destination has already started can't be cancelled: the destination
+finishes it. An item cancelled mid-load is reported as **unknown** (not
+skipped), with its load ID, and a warning is printed as soon as Ctrl+C is pressed.
 
-**Summary.** One row per item: outcome (ok / partial / failed / skipped), item
+**Summary.** One row per item: outcome (ok / partial / failed / skipped / unknown), item
 counts, `.raif` name if left behind, and any source transfer IDs that could not
 be deleted.
 

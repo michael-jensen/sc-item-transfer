@@ -70,6 +70,7 @@ public class TransferRunnerTests
 
         Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
         Assert.Empty(_fake.Blobs);
+        Assert.All(run.Items, r => Assert.Null(r.UnfinishedLoad));
         Assert.Equal(30, run.Items[0].TotalItems);
         Assert.Equal(30, run.Items[0].TransferredItems);
         Assert.Equal(1, _fake.TokensIssued["dev-client"]);
@@ -269,5 +270,53 @@ public class TransferRunnerTests
         Assert.Equal(1, run.ExitCode);
         Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
         Assert.All(run.Items, r => Assert.Equal(ItemOutcome.Skipped, r.Outcome));
+    }
+
+    [Fact]
+    public async Task Cancelling_during_a_load_reports_the_item_as_unknown_not_skipped()
+    {
+        _fake.LoadNeverFinishes.Add(Home);
+        using var cts = new CancellationTokenSource();
+
+        // Cancel once the destination has started loading, as if the user pressed Ctrl+C mid-load.
+        var run = await RunAsync(cts.Token, (d, ct) =>
+        {
+            if (_fake.LoadOrder.Count > 0)
+                cts.Cancel();
+            return _time.Delay(d, ct);
+        }, Item(Home), Item(Media));
+
+        Assert.True(run.Cancelled);
+        Assert.Equal(1, run.ExitCode);
+        Assert.Equal([ItemOutcome.Unknown, ItemOutcome.Skipped], run.Items.Select(r => r.Outcome));
+        var load = _fake.ItemTransfers.Values.Single();
+        Assert.Equal(load.BlobName, run.Items[0].UnfinishedLoad);
+        Assert.Equal(load.Id, run.Items[0].LoadTransferId);
+        Assert.Contains("Cancelling doesn't stop", _log.ToString());
+        Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
+    }
+
+    [Fact]
+    public async Task Timing_out_on_a_load_leaves_it_marked_unfinished()
+    {
+        _fake.LoadNeverFinishes.Add(Home);
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(ItemOutcome.Failed, run.Items[0].Outcome);
+        Assert.Contains("Timed out", run.Items[0].Error);
+        Assert.Equal(_fake.ItemTransfers.Values.Single().BlobName, run.Items[0].UnfinishedLoad);
+    }
+
+    [Fact]
+    public async Task Rejected_load_is_not_marked_unfinished()
+    {
+        _fake.ConsumeRejects.Add(Home);
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(ItemOutcome.Failed, run.Items[0].Outcome);
+        Assert.Contains("read-only", run.Items[0].Error);
+        Assert.Null(run.Items[0].UnfinishedLoad);
     }
 }

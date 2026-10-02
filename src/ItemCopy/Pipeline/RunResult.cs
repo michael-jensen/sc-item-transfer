@@ -17,6 +17,9 @@ public enum ItemOutcome
 
     /// <summary>Not attempted because an earlier item failed or the run was cancelled.</summary>
     Skipped,
+
+    /// <summary>The run was cancelled after the destination started loading; the destination finishes the load regardless.</summary>
+    Unknown,
 }
 
 public sealed class ItemResult(JobItem item, Guid transferId)
@@ -40,6 +43,15 @@ public sealed class ItemResult(JobItem item, Guid transferId)
     public List<string> Blobs { get; } = [];
     public HashSet<string> DeletedBlobs { get; } = [];
 
+    /// <summary>
+    /// The blob the destination may still be loading: set once the load is requested and cleared when
+    /// it reaches a final state. Stopping item-copy doesn't stop the load.
+    /// </summary>
+    public string? UnfinishedLoad { get; set; }
+
+    /// <summary>The destination's ID for the most recent load, once known.</summary>
+    public string? LoadTransferId { get; set; }
+
     public IEnumerable<string> LeftoverBlobs => Blobs.Where(b => !DeletedBlobs.Contains(b));
 
     public bool LeftoverSourceTransfer => SourceTransferCreated && !SourceTransferDeleted;
@@ -52,7 +64,7 @@ public sealed class RunResult(IReadOnlyList<ItemResult> items, bool cancelled)
 
     /// <summary>0 = all ok, 1 = failure or cancelled, 2 = finished but at least one item partial.</summary>
     public int ExitCode =>
-        Cancelled || Items.Any(i => i.Outcome is ItemOutcome.Failed or ItemOutcome.Skipped or ItemOutcome.Pending) ? 1
+        Cancelled || Items.Any(i => i.Outcome is ItemOutcome.Failed or ItemOutcome.Skipped or ItemOutcome.Unknown or ItemOutcome.Pending) ? 1
         : Items.Any(i => i.Outcome == ItemOutcome.Partial) ? 2
         : 0;
 }

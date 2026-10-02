@@ -1,5 +1,6 @@
 using ItemCopy.Cli;
 using ItemCopy.Config;
+using ItemCopy.Pipeline;
 
 namespace ItemCopy.Tests.Cli;
 
@@ -119,5 +120,31 @@ public class ConfirmationTests
     {
         var (ui, _) = MakeUi(interactive: false);
         Assert.Equal(expected, Confirmation.Confirm(Run(yes: true, confirmEnv: confirmEnv), "PROD", isProtected: true, ui));
+    }
+}
+
+public class ReportTests
+{
+    private static readonly SitecoreEnvironment Dev = new("DEV", "dev.test", "id", "secret");
+    private static readonly SitecoreEnvironment Sit = new("SIT", "sit.test", "id", "secret");
+
+    [Fact]
+    public void Summary_explains_a_load_that_was_still_running_when_the_run_stopped()
+    {
+        var item = new ItemResult(new JobItem("/sitecore/content/Home", TransferScope.ItemAndDescendants, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Unknown,
+            UnfinishedLoad = "contentTransfer-a.raif",
+            LoadTransferId = "consumed.20261002 010005 1.abc",
+        };
+        item.Blobs.Add("contentTransfer-a.raif");
+        var output = new StringWriter();
+
+        Report.Summary(new RunResult([item], cancelled: true), Dev, Sit, new Ui(output, TextReader.Null, interactive: false, verbose: false, color: false));
+
+        var text = output.ToString();
+        Assert.Contains("UNKNOWN  /sitecore/content/Home", text);
+        Assert.Contains("SIT was still loading contentTransfer-a.raif (load ID consumed.20261002 010005 1.abc)", text);
+        Assert.Contains("contentTransfer-a.raif (wait for its load to finish before deleting it)", text);
     }
 }

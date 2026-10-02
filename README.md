@@ -137,6 +137,11 @@ its `.raif` is kept in the destination for investigation, and the run continues.
 Network errors and 5xx/429 responses are retried up to 3 times. A load that fails is retried once.
 Ctrl+C cancels and cleans up source transfers; press it twice to exit immediately.
 
+**Ctrl+C can't stop a load that has already started.** Once step 5 begins, the destination finishes
+loading the `.raif` on its own. If you cancel then, item-copy warns straight away, and the summary
+reports the item as `UNKNOWN` with the destination's load ID. Assume the items were written, and
+check the destination.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -159,7 +164,7 @@ Ctrl+C cancels and cleans up source transfers; press it twice to exit immediatel
   - **warning**: `OverrideExistingTree` with `SingleItem`.
 - Nothing is published.
 - If a run is interrupted, the summary lists anything left behind: `.raif` files on the destination
-  or transfer IDs on the source.
+  or transfer IDs on the source. Don't delete a `.raif` while its load may still be running.
 
 ## Publishing
 

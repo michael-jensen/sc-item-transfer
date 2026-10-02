@@ -71,6 +71,8 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         {
             cancelled = true;
             ui.Warn("Cancelled.");
+            foreach (var result in results.Where(r => r.UnfinishedLoad is not null))
+                ui.Warn($"{destination.Name} had already started loading {result.UnfinishedLoad} into {job.Database} and will finish it. Cancelling doesn't stop a load.");
         }
         finally
         {
@@ -78,7 +80,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         }
 
         foreach (var result in results.Where(r => r.Outcome == ItemOutcome.Pending))
-            result.Outcome = ItemOutcome.Skipped;
+            result.Outcome = result.UnfinishedLoad is null ? ItemOutcome.Skipped : ItemOutcome.Unknown;
 
         return new RunResult(results, cancelled);
     }
@@ -201,10 +203,22 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         }, ct);
 
         ui.Info($"Loading {blob} into {destination.Name}/{database}...");
-        var location = await items.StartConsumeAsync(destination, database, blob, ct);
+        // Until the destination answers, assume the load may have started. Once it has, nothing here can stop it.
+        result.UnfinishedLoad = blob;
+        Uri? location;
+        try
+        {
+            location = await items.StartConsumeAsync(destination, database, blob, ct);
+        }
+        catch (SitecoreApiException ex) when (ex.StatusCode is { } status && (int)status < 500)
+        {
+            result.UnfinishedLoad = null; // refused, so nothing is loading
+            throw;
+        }
 
         var transferId = await PollAsync($"the load of {blob} to appear on {destination.Name}", settings.TransferLookupTimeout,
             () => items.ResolveTransferIdAsync(destination, location, blob, ct), ct);
+        result.LoadTransferId = transferId;
         ui.Debug($"Load transfer ID: {transferId}");
 
         // After a retry, a Failed state only counts once the retry has visibly started (a non-Failed state
@@ -221,6 +235,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
             switch (t?.TransferState)
             {
                 case ItemTransferState.Finished:
+                    result.UnfinishedLoad = null;
                     return t;
                 case ItemTransferState.Failed when retriedAt is null:
                     ui.Warn($"Loading {blob} failed{Describe(t)}; retrying once.");
@@ -231,13 +246,15 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
                     if (await items.FindTransferIdBySourceAsync(destination, blob, ct) is { } newest && newest != transferId)
                     {
                         ui.Debug($"Retry created load transfer {newest}");
-                        transferId = newest;
+                        transferId = result.LoadTransferId = newest;
                         retryStarted = true;
                     }
                     return null;
                 case ItemTransferState.Failed:
+                    result.UnfinishedLoad = null;
                     throw new InvalidOperationException($"Loading {blob} failed again after a retry{Describe(t)}.");
                 case ItemTransferState.Discarded:
+                    result.UnfinishedLoad = null;
                     throw new InvalidOperationException($"Loading {blob} was discarded{Describe(t)}.");
                 default:
                     return null;

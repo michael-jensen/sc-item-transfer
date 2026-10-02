@@ -47,6 +47,7 @@ public static class Report
                 ItemOutcome.Ok => ("OK     ", Ui.Ansi.Green),
                 ItemOutcome.Partial => ("PARTIAL", Ui.Ansi.Yellow),
                 ItemOutcome.Failed => ("FAILED ", Ui.Ansi.Red),
+                ItemOutcome.Unknown => ("UNKNOWN", Ui.Ansi.Yellow),
                 _ => ("SKIPPED", Ui.Ansi.Dim),
             };
             var counts = result.TotalItems is { } total ? $"  ({result.TransferredItems ?? 0}/{total} items written)" : "";
@@ -56,9 +57,16 @@ public static class Report
                 ui.Plain($"           {result.Error}", Ui.Ansi.Red);
             if (result.ValidationErrors.Count > 0)
                 ui.Plain($"           {result.ValidationErrors.Count} validation error(s), see log above.", Ui.Ansi.Yellow);
+            if (result.UnfinishedLoad is { } loading)
+            {
+                var id = result.LoadTransferId is { } loadId ? $" (load ID {loadId})" : "";
+                ui.Plain($"           {destination.Name} was still loading {loading}{id} when item-copy stopped, and finishes it regardless. Check the items in {destination.Name}.", Ui.Ansi.Yellow);
+            }
         }
 
-        var blobs = run.Items.SelectMany(r => r.LeftoverBlobs).ToList();
+        var blobs = run.Items
+            .SelectMany(r => r.LeftoverBlobs.Select(b => b == r.UnfinishedLoad ? $"{b} (wait for its load to finish before deleting it)" : b))
+            .ToList();
         var transfers = run.Items.Where(r => r.LeftoverSourceTransfer).ToList();
         if (blobs.Count > 0 || transfers.Count > 0)
         {
