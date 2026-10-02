@@ -193,8 +193,10 @@ item-copy --help | --version
    name→host, database, then a numbered table of paths with scope and merge
    strategy. `OverrideExistingTree` rows are highlighted as destructive.
    Warnings follow the table.
-2. `--dry-run`: additionally acquire a token for source and destination
-   (verifies credentials), print "Dry run OK", exit 0.
+2. `--dry-run`: acquire a token for source and destination (verifies
+   credentials), then create a source transfer per item, wait for each export,
+   print each path's item count (or why it failed), and delete the transfers.
+   Nothing is sent to the destination. Exit 0 if every path exported, else 1.
 3. Destination not protected: prompt `Proceed? [y/N]` unless `--yes`.
 4. Destination protected: prompt `Type the destination environment name (PROD)
    to continue:`; must match case-insensitively. `--yes` alone does **not**

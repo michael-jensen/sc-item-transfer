@@ -99,7 +99,7 @@ item, or copy the parent with `ItemAndDescendants`.
 ```
 item-copy run <job.json> [options]
 
-  --dry-run             Validate the job and test credentials for both environments, then stop.
+  --dry-run             Check the job, both sets of credentials, and each path's item count, then stop.
   --yes                 Skip the y/N prompt (protected destinations also need --confirm-env).
   --confirm-env <name>  Confirm a protected destination (e.g. PROD) without typing it.
   --env-file <path>     Use a specific .env file.
@@ -109,7 +109,16 @@ item-copy run <job.json> [options]
 
 From source, use `dotnet run --project src/ItemCopy -- run jobs/home-to-sit.json`.
 
-Start with `--dry-run`, then try a single `SingleItem` job before larger ones.
+Start with `--dry-run`. Besides validating the job and credentials, it exports each path from the
+source to count its items, then deletes those exports. Nothing is sent to the destination:
+
+```
+Dry run: nothing was written to SIT.
+  1046 item(s)  /sitecore/content/MySite/Home/Sample
+```
+
+A count much larger than you expected means the path is too broad. A path the source can't export
+fails here rather than mid-run.
 
 Before writing anything, item-copy prints the plan (environments, database, each path with its scope
 and merge strategy, and any warnings) and asks to proceed. For a protected destination you must type

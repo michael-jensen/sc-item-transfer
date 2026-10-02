@@ -85,6 +85,55 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         return new RunResult(results, cancelled);
     }
 
+    /// <summary>
+    /// Dry run: exports every item from the source to check its path and count its items, then deletes
+    /// the exports. Nothing is sent to the destination.
+    /// </summary>
+    public async Task<RunResult> PreviewAsync(Job job, SitecoreEnvironment source, CancellationToken ct)
+    {
+        var results = job.Items.Select(i => new ItemResult(i, settings.NewTransferId())).ToList();
+        var cancelled = false;
+
+        try
+        {
+            ui.Step($"Exporting {results.Count} item(s) from {source.Name} to count them...");
+            await Task.WhenAll(results.Select(r => CreateSourceTransferAsync(r, job, source, ct)));
+
+            foreach (var result in results.Where(r => r.Outcome != ItemOutcome.Failed))
+            {
+                ui.Plain();
+                ui.Step(result.Item.Path);
+                try
+                {
+                    var chunkSets = await WaitForExportAsync(result, source, ct);
+                    result.TotalItems = chunkSets.Sum(c => c.TotalItemCount);
+                    result.Outcome = ItemOutcome.Ok;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    // Unlike a real run, keep going: the point is to report every path.
+                    result.Outcome = ItemOutcome.Failed;
+                    result.Error = ex.Message;
+                    ui.Error($"{result.Item.Path}: {ex.Message}");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            cancelled = true;
+            ui.Warn("Cancelled.");
+        }
+        finally
+        {
+            await DeleteRemainingSourceTransfersAsync(results, source);
+        }
+
+        foreach (var result in results.Where(r => r.Outcome == ItemOutcome.Pending))
+            result.Outcome = ItemOutcome.Skipped;
+
+        return new RunResult(results, cancelled);
+    }
+
     private async Task CreateSourceTransferAsync(ItemResult result, Job job, SitecoreEnvironment source, CancellationToken ct)
     {
         // Until the source answers, assume the transfer may exist so cleanup (including after Ctrl+C) tries to delete it.
@@ -312,7 +361,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         if (remaining.Count == 0)
             return;
 
-        ui.Info($"Cleaning up {remaining.Count} unused transfer(s) on {source.Name}...");
+        ui.Info($"Deleting {remaining.Count} transfer(s) on {source.Name}...");
         await Task.WhenAll(remaining.Select(r => DeleteSourceTransferAsync(r, source, CancellationToken.None)));
     }
 

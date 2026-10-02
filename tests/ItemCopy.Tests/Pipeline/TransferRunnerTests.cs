@@ -22,19 +22,23 @@ public class TransferRunnerTests
 
     private Task<RunResult> RunAsync(params JobItem[] items) => RunAsync(CancellationToken.None, null, items);
 
-    private Task<RunResult> RunAsync(CancellationToken ct, Func<TimeSpan, CancellationToken, Task>? delay, params JobItem[] items)
+    private Task<RunResult> RunAsync(CancellationToken ct, Func<TimeSpan, CancellationToken, Task>? delay, params JobItem[] items) =>
+        Runner(delay).RunAsync(new Job("DEV", "SIT", "master", items), _source, _destination, ct);
+
+    private Task<RunResult> PreviewAsync(params JobItem[] items) =>
+        Runner(null).PreviewAsync(new Job("DEV", "SIT", "master", items), _source, CancellationToken.None);
+
+    private TransferRunner Runner(Func<TimeSpan, CancellationToken, Task>? delay)
     {
         var httpClient = new HttpClient(_fake);
         var ui = new Ui(_log, TextReader.Null, interactive: false, verbose: true, color: false);
         var tokens = new TokenProvider(httpClient, FakeSitecore.AuthUrl, "https://api.test", _time);
         var http = new SitecoreHttp(httpClient, tokens, new RetryPolicy { Delay = _time.Delay }, ui);
-        var runner = new TransferRunner(
+        return new TransferRunner(
             new ContentTransferClient(http, ui),
             new ItemTransferClient(http),
             ui,
             new RunnerSettings { Time = _time, Delay = delay ?? _time.Delay, Timeout = TimeSpan.FromMinutes(5) });
-
-        return runner.RunAsync(new Job("DEV", "SIT", "master", items), _source, _destination, ct);
     }
 
     private static JobItem Item(string path, TransferScope scope = TransferScope.ItemAndDescendants, MergeStrategy merge = MergeStrategy.OverrideExistingItem) =>
@@ -318,5 +322,34 @@ public class TransferRunnerTests
         Assert.Equal(ItemOutcome.Failed, run.Items[0].Outcome);
         Assert.Contains("read-only", run.Items[0].Error);
         Assert.Null(run.Items[0].UnfinishedLoad);
+    }
+
+    [Fact]
+    public async Task Dry_run_counts_items_per_path_and_writes_nothing_to_the_destination()
+    {
+        _fake.ChunkCounts[Home] = 3;
+
+        var run = await PreviewAsync(Item(Home), Item(Media));
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Equal([ItemOutcome.Ok, ItemOutcome.Ok], run.Items.Select(r => r.Outcome));
+        Assert.Equal([30, 20], run.Items.Select(r => r.TotalItems));
+        Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
+        Assert.DoesNotContain(_fake.Requests, r => r.Contains(FakeSitecore.DestinationHost));
+    }
+
+    [Fact]
+    public async Task Dry_run_reports_every_path_the_source_cannot_export()
+    {
+        _fake.ExportFails.Add(Home);
+        _fake.CreateRejects.Add(Footer);
+
+        var run = await PreviewAsync(Item(Home), Item(Media), Item(Footer));
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Equal([ItemOutcome.Failed, ItemOutcome.Ok, ItemOutcome.Failed], run.Items.Select(r => r.Outcome));
+        Assert.Contains("Check that the path exists", run.Items[0].Error);
+        Assert.Contains("Invalid item path", run.Items[2].Error);
+        Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
     }
 }

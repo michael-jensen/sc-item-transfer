@@ -64,6 +64,38 @@ public static class Report
             }
         }
 
+        LeftBehind(run, source, destination, ui);
+
+        ui.Plain();
+        ui.Plain("Transferred items follow your normal publishing workflow; nothing has been published.", Ui.Ansi.Dim);
+    }
+
+    /// <summary>Prints what a dry run found: each path's item count, or why the source couldn't export it.</summary>
+    public static void DryRun(RunResult run, SitecoreEnvironment source, SitecoreEnvironment destination, Ui ui)
+    {
+        ui.Plain();
+        ui.Plain($"Dry run: nothing was written to {destination.Name}.", Ui.Ansi.Bold);
+
+        var rows = run.Items.Select(r => (Result: r, Label: r.Outcome switch
+        {
+            ItemOutcome.Ok => $"{r.TotalItems} item(s)",
+            ItemOutcome.Failed => "FAILED",
+            _ => "SKIPPED",
+        })).ToList();
+        var width = rows.Max(row => row.Label.Length);
+
+        foreach (var (result, label) in rows)
+        {
+            ui.Plain($"  {label.PadLeft(width)}  {result.Item.Path}", result.Outcome == ItemOutcome.Failed ? Ui.Ansi.Red : null);
+            if (result.Error is not null)
+                ui.Plain($"  {"".PadLeft(width)}  {result.Error}", Ui.Ansi.Red);
+        }
+
+        LeftBehind(run, source, destination, ui);
+    }
+
+    private static void LeftBehind(RunResult run, SitecoreEnvironment source, SitecoreEnvironment destination, Ui ui)
+    {
         var blobs = run.Items
             .SelectMany(r => r.LeftoverBlobs.Select(b => b == r.UnfinishedLoad ? $"{b} (wait for its load to finish before deleting it)" : b))
             .ToList();
@@ -80,8 +112,5 @@ public static class Report
 
         if (run.Cancelled)
             ui.Plain("Run was cancelled.", Ui.Ansi.Yellow);
-
-        ui.Plain();
-        ui.Plain("Transferred items follow your normal publishing workflow; nothing has been published.", Ui.Ansi.Dim);
     }
 }

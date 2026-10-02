@@ -147,4 +147,28 @@ public class ReportTests
         Assert.Contains("SIT was still loading contentTransfer-a.raif (load ID consumed.20261002 010005 1.abc)", text);
         Assert.Contains("contentTransfer-a.raif (wait for its load to finish before deleting it)", text);
     }
+
+    [Fact]
+    public void Dry_run_summary_lists_item_counts_and_failures()
+    {
+        var ok = new ItemResult(new JobItem("/sitecore/content/Home", TransferScope.ItemAndDescendants, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Ok,
+            TotalItems = 1046,
+        };
+        var failed = new ItemResult(new JobItem("/sitecore/content/Typo", TransferScope.SingleItem, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Failed,
+            Error = "DEV reported the export as Failed.",
+        };
+        var output = new StringWriter();
+
+        Report.DryRun(new RunResult([ok, failed], cancelled: false), Dev, Sit, new Ui(output, TextReader.Null, interactive: false, verbose: false, color: false));
+
+        var lines = output.ToString().Split(Environment.NewLine);
+        Assert.Contains("Dry run: nothing was written to SIT.", lines);
+        Assert.Contains("  1046 item(s)  /sitecore/content/Home", lines);
+        Assert.Contains("        FAILED  /sitecore/content/Typo", lines);
+        Assert.Contains("                DEV reported the export as Failed.", lines);
+    }
 }

@@ -104,21 +104,22 @@ public static class Program
             ui.Info($"Authenticated with {env.Name}.");
         }
 
-        if (options.DryRun)
-        {
-            ui.Success("Dry run OK: job is valid and both environments accepted their credentials. Nothing was transferred.");
-            return 0;
-        }
-
-        if (!Confirmation.Confirm(options, destination.Name, destinationProtected, ui))
-            return 1;
-
         var http = new SitecoreHttp(httpClient, tokens, new RetryPolicy(), ui);
         var runner = new TransferRunner(
             new ContentTransferClient(http, ui),
             new ItemTransferClient(http),
             ui,
             new RunnerSettings { Timeout = options.Timeout ?? Options.DefaultTimeout });
+
+        if (options.DryRun)
+        {
+            var preview = await runner.PreviewAsync(job, source, ct);
+            Report.DryRun(preview, source, destination, ui);
+            return preview.ExitCode;
+        }
+
+        if (!Confirmation.Confirm(options, destination.Name, destinationProtected, ui))
+            return 1;
 
         var result = await runner.RunAsync(job, source, destination, ct);
         Report.Summary(result, source, destination, ui);
