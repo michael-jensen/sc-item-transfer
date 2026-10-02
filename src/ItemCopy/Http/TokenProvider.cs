@@ -7,8 +7,10 @@ namespace ItemCopy.Http;
 /// Gets client-credentials JWTs from Sitecore Cloud auth, one per environment, cached in memory
 /// until shortly before they expire.
 /// </summary>
-public sealed class TokenProvider(HttpClient http, string authUrl, string audience, TimeProvider time)
+public sealed class TokenProvider(HttpClient http, string authUrl, string audience, TimeProvider time, RetryPolicy? retryPolicy = null)
 {
+    private readonly RetryPolicy _retry = retryPolicy ?? new RetryPolicy();
+
     private static readonly TimeSpan ExpiryMargin = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DefaultLifetime = TimeSpan.FromHours(24);
 
@@ -50,7 +52,39 @@ public sealed class TokenProvider(HttpClient http, string authUrl, string audien
 
     private async Task<(string Token, TimeSpan Lifetime)> RequestTokenAsync(SitecoreEnvironment env, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, authUrl)
+        for (var attempt = 1; ; attempt++)
+        {
+            var canRetry = attempt <= _retry.MaxRetries;
+            HttpResponseMessage response;
+            try
+            {
+                using var request = BuildRequest(env);
+                response = await http.SendAsync(request, ct);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+            {
+                if (canRetry)
+                {
+                    await _retry.Delay(_retry.Backoff(attempt), ct);
+                    continue;
+                }
+                var reason = ex is TaskCanceledException ? "the request timed out" : ex.Message;
+                throw new AuthException($"Could not reach {authUrl} to get a token for {env.Name}: {reason}");
+            }
+
+            if (SitecoreHttp.IsTransientStatus(response.StatusCode) && canRetry)
+            {
+                response.Dispose();
+                await _retry.Delay(_retry.Backoff(attempt), ct);
+                continue;
+            }
+
+            return await ReadTokenAsync(env, response, ct);
+        }
+    }
+
+    private HttpRequestMessage BuildRequest(SitecoreEnvironment env) =>
+        new(HttpMethod.Post, authUrl)
         {
             Content = new FormUrlEncodedContent(new Dictionary<string, string>
             {
@@ -61,16 +95,8 @@ public sealed class TokenProvider(HttpClient http, string authUrl, string audien
             }),
         };
 
-        HttpResponseMessage response;
-        try
-        {
-            response = await http.SendAsync(request, ct);
-        }
-        catch (HttpRequestException ex)
-        {
-            throw new AuthException($"Could not reach {authUrl} to get a token for {env.Name}: {ex.Message}");
-        }
-
+    private static async Task<(string Token, TimeSpan Lifetime)> ReadTokenAsync(SitecoreEnvironment env, HttpResponseMessage response, CancellationToken ct)
+    {
         using (response)
         {
             var body = await response.Content.ReadAsStringAsync(ct);

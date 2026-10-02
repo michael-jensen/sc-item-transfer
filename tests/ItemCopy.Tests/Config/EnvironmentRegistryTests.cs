@@ -28,6 +28,15 @@ public class EnvironmentRegistryTests
         Assert.Equal("id", env.ClientId);
     }
 
+    [Theory]
+    [InlineData("foo bar")]
+    [InlineData("host.example.com/path")]
+    public void Rejects_invalid_hosts(string host)
+    {
+        var ex = Assert.Throws<ConfigException>(() => Registry(Env("DEV", host)).Resolve("dev"));
+        Assert.Contains("SITECORE_DEV_HOST", ex.Message);
+    }
+
     [Fact]
     public void Reports_missing_settings()
     {

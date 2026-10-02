@@ -85,18 +85,20 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 
     private async Task CreateSourceTransferAsync(ItemResult result, Job job, SitecoreEnvironment source, CancellationToken ct)
     {
+        // Until the source answers, assume the transfer may exist so cleanup (including after Ctrl+C) tries to delete it.
+        result.SourceTransferCreated = true;
+        result.SourceTransferUncertain = true;
         try
         {
             await content.CreateAsync(source, result.TransferId, result.Item, job.Database, ct);
-            result.SourceTransferCreated = true;
+            result.SourceTransferUncertain = false;
             ui.Debug($"Created transfer {result.TransferId} for {result.Item.Path}");
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            // A 4xx means the source rejected it; otherwise it may have been created, so cleanup tries to delete it.
-            var rejected = ex is SitecoreApiException { StatusCode: { } status } && (int)status < 500;
-            result.SourceTransferCreated = !rejected;
-            result.SourceTransferUncertain = !rejected;
+            // A 4xx means the source rejected it, so there's nothing to clean up.
+            if (ex is SitecoreApiException { StatusCode: { } status } && (int)status < 500)
+                result.SourceTransferCreated = result.SourceTransferUncertain = false;
             result.Outcome = ItemOutcome.Failed;
             result.Error = ex.Message;
             ui.Error($"{result.Item.Path}: {ex.Message}");
@@ -136,6 +138,8 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
     private async Task<IReadOnlyList<ChunkSetMetadata>> WaitForExportAsync(ItemResult result, SitecoreEnvironment source, CancellationToken ct)
     {
         ui.Info($"Waiting for {source.Name} to prepare the export...");
+        // Creation is accepted asynchronously, so briefly allow the transfer to be not-yet-registered.
+        var notFoundDeadline = settings.Time.GetUtcNow() + settings.TransferLookupTimeout;
         var status = await PollAsync($"the export of {result.Item.Path} on {source.Name}", settings.Timeout, async () =>
         {
             var s = await content.GetStatusAsync(source, result.TransferId, ct);
@@ -143,7 +147,8 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
             {
                 ContentTransferState.Completed => s,
                 ContentTransferState.Failed => throw new InvalidOperationException($"{source.Name} reported the export as Failed. Check that the path exists in {source.Name}."),
-                ContentTransferState.NotFound => throw new InvalidOperationException($"{source.Name} has no transfer {result.TransferId} (NotFound)."),
+                ContentTransferState.NotFound when settings.Time.GetUtcNow() >= notFoundDeadline =>
+                    throw new InvalidOperationException($"{source.Name} has no transfer {result.TransferId} (NotFound)."),
                 _ => null,
             };
         }, ct);
@@ -202,18 +207,33 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
             () => items.ResolveTransferIdAsync(destination, location, blob, ct), ct);
         ui.Debug($"Load transfer ID: {transferId}");
 
-        var retried = false;
+        // After a retry, a Failed state only counts once the retry has visibly started (a non-Failed state
+        // or a new transfer ID), or the lookup grace period has passed. The retry may re-queue
+        // asynchronously or create a new transfer record.
+        DateTimeOffset? retriedAt = null;
+        var retryStarted = false;
         var transfer = await PollAsync($"the load of {blob} on {destination.Name}", settings.Timeout, async () =>
         {
             var t = await items.GetTransferAsync(destination, transferId, ct);
+            if (retriedAt is not null && t?.TransferState is { } state && state != ItemTransferState.Failed)
+                retryStarted = true;
+
             switch (t?.TransferState)
             {
                 case ItemTransferState.Finished:
                     return t;
-                case ItemTransferState.Failed when !retried:
-                    retried = true;
+                case ItemTransferState.Failed when retriedAt is null:
                     ui.Warn($"Loading {blob} failed{Describe(t)}; retrying once.");
                     await items.RetryAsync(destination, database, blob, ct);
+                    retriedAt = settings.Time.GetUtcNow();
+                    return null;
+                case ItemTransferState.Failed when !retryStarted && settings.Time.GetUtcNow() - retriedAt < settings.TransferLookupTimeout:
+                    if (await items.FindTransferIdBySourceAsync(destination, blob, ct) is { } newest && newest != transferId)
+                    {
+                        ui.Debug($"Retry created load transfer {newest}");
+                        transferId = newest;
+                        retryStarted = true;
+                    }
                     return null;
                 case ItemTransferState.Failed:
                     throw new InvalidOperationException($"Loading {blob} failed again after a retry{Describe(t)}.");

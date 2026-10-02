@@ -71,11 +71,22 @@ public sealed class ContentTransferClient(SitecoreHttp http, Ui ui)
 
         using var getResponse = await http.SendAsync(
             source,
-            () => new HttpRequestMessage(HttpMethod.Get, Url(source, chunkPath)),
+            () =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, Url(source, chunkPath));
+                request.Headers.Accept.ParseAdd("application/octet-stream");
+                request.Headers.Accept.ParseAdd("*/*;q=0.1");
+                return request;
+            },
             ct,
             retryTransient: false,
             completion: HttpCompletionOption.ResponseHeadersRead);
-        await SitecoreHttp.EnsureSuccessAsync(getResponse, $"Downloading chunk {chunkId} from {source.Name}", ct);
+        // A 400 is documented for invalid IDs or a chunk with no processed items.
+        var action = getResponse.StatusCode == HttpStatusCode.BadRequest
+            ? $"Downloading chunk {chunkId} from {source.Name} (the source rejected the chunk; it may contain no exportable items)"
+            : $"Downloading chunk {chunkId} from {source.Name}";
+        await SitecoreHttp.EnsureSuccessAsync(getResponse, action, ct);
+        EnsureRawChunk(getResponse, chunkId);
 
         var info = ChunkInfo.Parse(ContentDisposition(getResponse));
 
@@ -122,6 +133,20 @@ public sealed class ContentTransferClient(SitecoreHttp http, Ui ui)
         if (response.StatusCode == HttpStatusCode.NotFound)
             return;
         await SitecoreHttp.EnsureSuccessAsync(response, $"Deleting transfer {transferId} on {source.Name}", ct);
+    }
+
+    /// <summary>
+    /// Refuses chunk bodies that aren't the raw stream: a JSON (e.g. base64-wrapped) or
+    /// transport-compressed body would otherwise be forwarded altered and corrupt the .raif.
+    /// </summary>
+    private static void EnsureRawChunk(HttpResponseMessage response, int chunkId)
+    {
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+        if (mediaType is not null && mediaType.Contains("json", StringComparison.OrdinalIgnoreCase))
+            throw new SitecoreApiException($"Chunk {chunkId} came back as {mediaType} instead of a binary stream; refusing to forward it.");
+
+        if (response.Content.Headers.ContentEncoding.Count > 0)
+            throw new SitecoreApiException($"Chunk {chunkId} came back with Content-Encoding {string.Join(", ", response.Content.Headers.ContentEncoding)}; refusing to forward it.");
     }
 
     private static Uri Url(SitecoreEnvironment env, string relative) => new(env.BaseUri, Prefix + relative);

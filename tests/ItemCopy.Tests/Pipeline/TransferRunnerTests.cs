@@ -189,6 +189,56 @@ public class TransferRunnerTests
     }
 
     [Fact]
+    public async Task Cancelling_during_create_still_deletes_transfers_that_reached_the_source()
+    {
+        using var cts = new CancellationTokenSource();
+        _fake.CancelAfterCreate = cts;
+
+        var run = await RunAsync(cts.Token, null, Item(Home));
+
+        Assert.True(run.Cancelled);
+        Assert.True(_fake.SourceTransfers.Values.Single().Deleted);
+        Assert.False(run.Items[0].LeftoverSourceTransfer);
+    }
+
+    [Fact]
+    public async Task Tolerates_transfer_not_being_visible_right_after_create()
+    {
+        _fake.StatusNotFoundPolls = 2;
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(0, run.ExitCode);
+    }
+
+    [Fact]
+    public async Task Follows_a_retry_that_creates_a_new_load_transfer()
+    {
+        _fake.LoadFailsOnce.Add(Home);
+        _fake.RetryCreatesNewTransfer = true;
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Equal(2, _fake.ItemTransfers.Count);
+        Assert.Contains(_fake.ItemTransfers.Values, t => t.Retried && t.State == "Finished");
+    }
+
+    [Fact]
+    public async Task Asks_for_binary_chunks_and_refuses_json_bodies()
+    {
+        _fake.ChunkCounts[Home] = 1;
+        _fake.ChunkContentType = "application/json";
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(ItemOutcome.Failed, run.Items[0].Outcome);
+        Assert.Contains("instead of a binary stream", run.Items[0].Error);
+        Assert.Empty(_fake.SavedChunks);
+        Assert.All(_fake.ChunkAcceptHeaders, a => Assert.StartsWith("application/octet-stream", a));
+    }
+
+    [Fact]
     public async Task Times_out_waiting_for_export()
     {
         _fake.ExportNeverCompletes.Add(Home);

@@ -25,6 +25,8 @@ public sealed class RetryPolicy
 /// </summary>
 public sealed class SitecoreHttp(HttpClient http, TokenProvider tokens, RetryPolicy retry, Ui ui)
 {
+    private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(60);
+
     public RetryPolicy Retry => retry;
 
     /// <param name="build">Creates a fresh request for each attempt.</param>
@@ -49,7 +51,8 @@ public sealed class SitecoreHttp(HttpClient http, TokenProvider tokens, RetryPol
             var token = await tokens.GetTokenAsync(env, ct);
             using var request = build();
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            if (request.Headers.Accept.Count == 0)
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
             var stopwatch = Stopwatch.StartNew();
             HttpResponseMessage response;
@@ -84,7 +87,7 @@ public sealed class SitecoreHttp(HttpClient http, TokenProvider tokens, RetryPol
             if (IsTransientStatus(response.StatusCode) && replayable && retryTransient && transientAttempts < retry.MaxRetries)
             {
                 transientAttempts++;
-                var delay = RetryAfter(response) ?? retry.Backoff(transientAttempts);
+                var delay = Min(RetryAfter(response) ?? retry.Backoff(transientAttempts), MaxRetryAfter);
                 ui.Warn($"{request.Method} {request.RequestUri?.AbsolutePath} returned {(int)response.StatusCode}; retrying in {delay.TotalSeconds:0}s ({transientAttempts}/{retry.MaxRetries}).");
                 response.Dispose();
                 await retry.Delay(delay, ct);
@@ -134,6 +137,8 @@ public sealed class SitecoreHttp(HttpClient http, TokenProvider tokens, RetryPol
     private static bool IsTransientException(Exception ex, CancellationToken ct) =>
         ex is HttpRequestException or IOException
         || ex is TaskCanceledException && !ct.IsCancellationRequested; // HttpClient timeout
+
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 
     private static TimeSpan? RetryAfter(HttpResponseMessage response)
     {

@@ -29,6 +29,16 @@ public sealed class FakeSitecore : HttpMessageHandler
     public Dictionary<string, int> ChunkCounts { get; } = [];
     public int ExportPollsBeforeComplete { get; set; } = 1;
     public HashSet<string> CreateRejects { get; } = [];
+    /// <summary>When set, the first create is recorded server-side, then this is cancelled before the response arrives.</summary>
+    public CancellationTokenSource? CancelAfterCreate { get; set; }
+    /// <summary>Status polls per transfer that return 404 before it becomes visible.</summary>
+    public int StatusNotFoundPolls { get; set; }
+    public string ChunkContentType { get; set; } = "application/octet-stream";
+    public List<string> ChunkAcceptHeaders { get; } = [];
+    /// <summary>A retry leaves the failed record in place and creates a new transfer record.</summary>
+    public bool RetryCreatesNewTransfer { get; set; }
+    /// <summary>Status codes returned by the next token requests.</summary>
+    public Queue<HttpStatusCode> AuthFailures { get; } = new();
     public HashSet<string> ExportFails { get; } = [];
     public HashSet<string> ExportNeverCompletes { get; } = [];
     /// <summary>Status codes returned by the next chunk GETs, before normal responses resume.</summary>
@@ -77,7 +87,7 @@ public sealed class FakeSitecore : HttpMessageHandler
         public string State { get; set; } = "InProgress";
         public int Polls { get; set; }
         public bool Retried { get; set; }
-        public DateTimeOffset ConsumedDate { get; } = DateTimeOffset.UtcNow;
+        public required DateTimeOffset ConsumedDate { get; init; }
     }
 
     /// <summary>Deterministic chunk bytes, including every byte value, so tests can check they arrive unchanged.</summary>
@@ -95,7 +105,7 @@ public sealed class FakeSitecore : HttpMessageHandler
             Requests.Add($"{request.Method} {uri.Host} {uri.AbsolutePath}");
 
             if (uri.ToString() == AuthUrl)
-                return IssueToken(body!);
+                return AuthFailures.TryDequeue(out var authFailure) ? Status(authFailure) : IssueToken(body!);
 
             if (request.Headers.Authorization?.Parameter is not { Length: > 0 })
                 return Status(HttpStatusCode.Unauthorized);
@@ -144,6 +154,12 @@ public sealed class FakeSitecore : HttpMessageHandler
                 Database = json["Configuration"]!["Database"]!.GetValue<string>(),
                 ChunkCount = ChunkCounts.GetValueOrDefault(itemPath, 2),
             };
+            if (CancelAfterCreate is { } cts)
+            {
+                CancelAfterCreate = null;
+                cts.Cancel();
+                throw new OperationCanceledException(cts.Token);
+            }
             return Status(HttpStatusCode.Accepted);
         }
 
@@ -152,10 +168,11 @@ public sealed class FakeSitecore : HttpMessageHandler
             if (!SourceTransfers.TryGetValue(Guid.Parse(statusMatch[1]), out var t) || t.Deleted)
                 return Json(HttpStatusCode.NotFound, new { Error = "Transfer not found" });
 
-            t.StatusPolls++;
+            if (++t.StatusPolls <= StatusNotFoundPolls)
+                return Json(HttpStatusCode.NotFound, new { Error = "Transfer not found" });
             if (ExportFails.Contains(t.Path))
                 return Json(HttpStatusCode.OK, new { State = "Failed" });
-            if (ExportNeverCompletes.Contains(t.Path) || t.StatusPolls <= ExportPollsBeforeComplete)
+            if (ExportNeverCompletes.Contains(t.Path) || t.StatusPolls - StatusNotFoundPolls <= ExportPollsBeforeComplete)
                 return Json(HttpStatusCode.OK, new { State = "Running" });
             return Json(HttpStatusCode.OK, new
             {
@@ -166,6 +183,7 @@ public sealed class FakeSitecore : HttpMessageHandler
 
         if (request.Method == HttpMethod.Get && Match(path, $@"^{ContentPrefix}/([^/]+)/chunksets/([^/]+)/chunks/(\d+)$") is { } chunkMatch)
         {
+            ChunkAcceptHeaders.Add(request.Headers.Accept.ToString());
             if (ChunkGetFailures.TryDequeue(out var failure))
                 return Status(failure);
 
@@ -175,6 +193,7 @@ public sealed class FakeSitecore : HttpMessageHandler
                 return Json(HttpStatusCode.NotFound, new { Error = "Chunk set doesn't exist" });
 
             var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(ChunkBytes(t.Path, chunkId)) };
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(ChunkContentType);
             response.Content.Headers.TryAddWithoutValidation(
                 "Content-Disposition",
                 $"attachment; filename=\"chunk{chunkId}.bin\"; ItemsProcessed=10; ItemsSkipped=0; IsMedia={(IsMediaPath(t.Path) ? "True" : "False")}");
@@ -249,8 +268,7 @@ public sealed class FakeSitecore : HttpMessageHandler
                 return Json(HttpStatusCode.BadRequest, new { Error = "Blob not ready" });
 
             blob.State = "Consumed";
-            var id = $"consumed.20261001 120000 {++_itemTransferCounter}.{Guid.NewGuid()}";
-            ItemTransfers[id] = new ItemTransfer { Id = id, BlobName = blobName, Path = blob.Path };
+            var id = NewItemTransfer(blobName, blob.Path);
             LoadOrder.Add(blob.Path);
 
             var response = Status(HttpStatusCode.Accepted);
@@ -263,12 +281,20 @@ public sealed class FakeSitecore : HttpMessageHandler
         if (request.Method == HttpMethod.Put && Match(path, "^/transfers/databases/([^/]+)/sources/([^/]+)$") is { } retryMatch)
         {
             var blobName = Uri.UnescapeDataString(retryMatch[2]);
-            var t = ItemTransfers.Values.Single(x => x.BlobName == blobName);
+            var t = ItemTransfers.Values.Where(x => x.BlobName == blobName).MaxBy(x => x.ConsumedDate)!;
             if (t.State != "Failed")
                 return Json(HttpStatusCode.BadRequest, new { Error = "Only failed transfers can be retried" });
-            t.State = "InProgress";
-            t.Polls = 0;
-            t.Retried = true;
+            if (RetryCreatesNewTransfer)
+            {
+                var newId = NewItemTransfer(blobName, t.Path);
+                ItemTransfers[newId].Retried = true;
+            }
+            else
+            {
+                t.State = "InProgress";
+                t.Polls = 0;
+                t.Retried = true;
+            }
             return Json(HttpStatusCode.OK, new { DatabaseName = "master", SourceName = blobName });
         }
 
@@ -310,6 +336,18 @@ public sealed class FakeSitecore : HttpMessageHandler
         }
 
         return Status(HttpStatusCode.NotFound);
+    }
+
+    private string NewItemTransfer(string blobName, string path)
+    {
+        var n = ++_itemTransferCounter;
+        var id = $"consumed.20261001 120000 {n}.{Guid.NewGuid()}";
+        ItemTransfers[id] = new ItemTransfer
+        {
+            Id = id, BlobName = blobName, Path = path,
+            ConsumedDate = new DateTimeOffset(2026, 10, 1, 12, 0, 0, TimeSpan.Zero).AddSeconds(n),
+        };
+        return id;
     }
 
     private static string[]? Match(string input, string pattern)

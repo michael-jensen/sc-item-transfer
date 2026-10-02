@@ -83,9 +83,13 @@ public sealed partial class EnvironmentRegistry
             throw new ConfigException($"Environment '{name}' is not configured. Missing: {string.Join(", ", missing)}");
 
         var upper = name.ToUpperInvariant();
+        var host = NormalizeHost(GetNonEmpty($"{Prefix}{upper}_HOST")!);
+        if (Uri.CheckHostName(host.Split(':')[0]) == UriHostNameType.Unknown || !Uri.TryCreate($"https://{host}", UriKind.Absolute, out var uri) || uri.AbsolutePath != "/")
+            throw new ConfigException($"{Prefix}{upper}_HOST '{host}' is not a valid host name. Use e.g. xmc-xxxx-dev.sitecorecloud.io.");
+
         return new SitecoreEnvironment(
             upper,
-            NormalizeHost(GetNonEmpty($"{Prefix}{upper}_HOST")!),
+            host,
             GetNonEmpty($"{Prefix}{upper}_CLIENT_ID")!,
             GetNonEmpty($"{Prefix}{upper}_CLIENT_SECRET")!);
     }

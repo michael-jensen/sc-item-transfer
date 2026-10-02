@@ -1,3 +1,4 @@
+using System.Net;
 using ItemCopy.Config;
 using ItemCopy.Http;
 using ItemCopy.Tests.Fakes;
@@ -9,7 +10,8 @@ public class TokenProviderTests
     private readonly FakeSitecore _fake = new();
     private readonly ManualTime _time = new();
 
-    private TokenProvider Provider() => new(new HttpClient(_fake), FakeSitecore.AuthUrl, "https://api.test", _time);
+    private TokenProvider Provider() =>
+        new(new HttpClient(_fake), FakeSitecore.AuthUrl, "https://api.test", _time, new RetryPolicy { Delay = _time.Delay });
 
     [Fact]
     public async Task Caches_tokens_until_near_expiry()
@@ -50,5 +52,14 @@ public class TokenProviderTests
         Assert.Contains("access_denied", ex.Message);
         Assert.Contains("SITECORE_PROD_CLIENT_SECRET", ex.Message);
         Assert.DoesNotContain("wrong-secret", ex.Message);
+    }
+
+    [Fact]
+    public async Task Retries_transient_auth_failures()
+    {
+        _fake.AuthFailures.Enqueue(HttpStatusCode.ServiceUnavailable);
+        var env = new SitecoreEnvironment("DEV", "d", "dev-client", "secret");
+
+        Assert.Equal("tok-dev-client-1", await Provider().GetTokenAsync(env, default));
     }
 }

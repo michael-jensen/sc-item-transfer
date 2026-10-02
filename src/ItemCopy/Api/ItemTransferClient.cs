@@ -93,7 +93,8 @@ public sealed class ItemTransferClient(SitecoreHttp http)
         return segment is null ? null : Uri.UnescapeDataString(segment);
     }
 
-    private async Task<string?> FindTransferIdBySourceAsync(SitecoreEnvironment destination, string blobName, CancellationToken ct)
+    /// <summary>Returns the ID of the most recently consumed transfer for <paramref name="blobName"/>, or null.</summary>
+    public async Task<string?> FindTransferIdBySourceAsync(SitecoreEnvironment destination, string blobName, CancellationToken ct)
     {
         ItemTransferStatus? newest = null;
         for (var page = 1; page <= MaxListPages; page++)

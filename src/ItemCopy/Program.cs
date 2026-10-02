@@ -58,6 +58,13 @@ public static class Program
             ui.Warn("Cancelled.");
             return 1;
         }
+        catch (Exception ex)
+        {
+            // Anything unexpected (file I/O, etc.): report it plainly rather than as a stack trace.
+            ui.Error($"{ex.GetType().Name}: {ex.Message}");
+            ui.Debug(ex.ToString());
+            return 1;
+        }
     }
 
     private static async Task<int> RunAsync(Options options, Ui ui, CancellationToken ct)
