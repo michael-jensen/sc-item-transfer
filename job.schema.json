@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "item-copy job",
+  "description": "Defines which Sitecore items item-copy transfers between environments.",
+  "type": "object",
+  "required": ["source", "destination", "items"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "source": {
+      "type": "string",
+      "description": "Source environment name, as configured in .env (SITECORE_<NAME>_HOST etc.).",
+      "pattern": "^[A-Za-z0-9_]+$"
+    },
+    "destination": {
+      "type": "string",
+      "description": "Destination environment name, as configured in .env.",
+      "pattern": "^[A-Za-z0-9_]+$"
+    },
+    "database": {
+      "type": "string",
+      "description": "Sitecore database on both sides. Defaults to master.",
+      "default": "master"
+    },
+    "items": {
+      "type": "array",
+      "description": "Items to transfer, applied to the destination in this order.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Full Sitecore item path, e.g. /sitecore/content/MySite/Home.",
+            "pattern": "^/[Ss][Ii][Tt][Ee][Cc][Oo][Rr][Ee]/"
+          },
+          "scope": {
+            "type": "string",
+            "description": "SingleItem transfers only this item; ItemAndDescendants transfers the whole subtree.",
+            "enum": ["SingleItem", "ItemAndDescendants"],
+            "default": "SingleItem"
+          },
+          "mergeStrategy": {
+            "type": "string",
+            "description": "How to handle items that already exist in the destination. OverrideExistingTree deletes the destination item and all its descendants before writing.",
+            "enum": ["OverrideExistingItem", "KeepExistingItem", "OverrideExistingTree"],
+            "default": "OverrideExistingItem"
+          }
+        }
+      }
+    }
+  }
+}

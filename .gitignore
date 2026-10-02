@@ -1,0 +1,17 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Job definitions are local working files; only the example is committed
+jobs/*
+!jobs/*.example.json
+
+# Build output
+bin/
+obj/
+publish/
+TestResults/
+*.user
+.vs/
+.idea/

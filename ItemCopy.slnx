@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ItemCopy/ItemCopy.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ItemCopy.Tests/ItemCopy.Tests.csproj" />
+  </Folder>
+</Solution>

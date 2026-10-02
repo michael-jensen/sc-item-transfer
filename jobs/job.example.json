@@ -1,0 +1,21 @@
+{
+  "$schema": "../job.schema.json",
+  "source": "dev",
+  "destination": "sit",
+  "database": "master",
+  "items": [
+    {
+      "path": "/sitecore/content/MySite/Home",
+      "scope": "ItemAndDescendants",
+      "mergeStrategy": "OverrideExistingItem"
+    },
+    {
+      "path": "/sitecore/media library/Project/MySite",
+      "scope": "ItemAndDescendants",
+      "mergeStrategy": "KeepExistingItem"
+    },
+    {
+      "path": "/sitecore/content/MySite/Data/Footer"
+    }
+  ]
+}

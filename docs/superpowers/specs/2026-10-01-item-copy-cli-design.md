@@ -1,7 +1,7 @@
 # item-copy — SitecoreAI content copy CLI
 
 **Date:** 2026-10-01
-**Status:** Draft for review
+**Status:** Approved, implemented
 
 ## Purpose
 
@@ -162,6 +162,8 @@ Warnings (shown in the plan, run continues):
   destination when the descendant loads).
 - A path sits under an earlier `ItemAndDescendants` path (redundant; it will be
   re-applied with its own merge strategy).
+- `OverrideExistingTree` with `SingleItem` (deletes the item's existing
+  descendants in the destination without replacing them).
 
 "Ancestor" = path prefix on a `/` boundary, case-insensitive.
 
@@ -205,6 +207,9 @@ Each job item becomes its own content transfer with its own new GUID.
 
 **Phase 1 — Create (parallel).** Get tokens for both environments (fail fast
 on bad credentials). Create one source transfer per item, all concurrently.
+A create rejected with a 4xx is known not to exist and is not cleaned up; a
+network error or 5xx may have created it, so cleanup tries to delete it and the
+summary marks it as possibly non-existent.
 
 **Phase 2 — Per item, in job order:**
 
