@@ -217,3 +217,7 @@ docs/superpowers/specs/ design spec
 The pipeline tests use `tests/ItemCopy.Tests/Fakes/FakeSitecore.cs`, which emulates auth, the source,
 and the destination based on the published OpenAPI specs. It hasn't been verified against every
 real-world response, so the first live runs should be small.
+
+## License
+
+[MIT](LICENSE)
