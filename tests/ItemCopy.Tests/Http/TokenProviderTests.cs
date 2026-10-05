@@ -36,7 +36,7 @@ public class TokenProviderTests
         var env = new SitecoreEnvironment("DEV", "d", "dev-client", "secret");
 
         var first = await provider.GetTokenAsync(env, default);
-        provider.Invalidate(env, first);
+        await provider.InvalidateAsync(env, first);
 
         Assert.NotEqual(first, await provider.GetTokenAsync(env, default));
     }

@@ -148,6 +148,21 @@ public class TransferRunnerTests
     }
 
     [Fact]
+    public async Task A_load_that_fails_after_its_retry_fails_the_item_and_keeps_the_blob()
+    {
+        _fake.LoadAlwaysFails.Add(Home);
+
+        var run = await RunAsync(Item(Home), Item(Media));
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Equal([ItemOutcome.Failed, ItemOutcome.Skipped], run.Items.Select(r => r.Outcome));
+        Assert.Contains("failed again after a retry", run.Items[0].Error);
+        Assert.Null(run.Items[0].UnfinishedLoad);
+        Assert.Single(run.Items[0].LeftoverBlobs);
+        Assert.Equal([Home], _fake.LoadOrder);
+    }
+
+    [Fact]
     public async Task Validation_errors_make_item_partial_and_keep_blob()
     {
         _fake.LoadValidationErrors[Media] = ["Item {abc} has an unknown template"];
@@ -175,7 +190,7 @@ public class TransferRunnerTests
         Assert.Empty(_fake.LoadOrder);
         Assert.Empty(_fake.SavedChunks);
         Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
-        Assert.All(run.Items, r => Assert.False(r.LeftoverSourceTransfer));
+        Assert.All(run.Items, r => Assert.False(r.SourceTransferExists));
     }
 
     [Fact]
@@ -189,7 +204,7 @@ public class TransferRunnerTests
         Assert.Contains("Invalid item path", run.Items[1].Error);
         Assert.Equal([Home], _fake.LoadOrder);
         Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
-        Assert.All(run.Items, r => Assert.False(r.LeftoverSourceTransfer));
+        Assert.All(run.Items, r => Assert.False(r.SourceTransferExists));
         Assert.DoesNotContain(_fake.Requests, r => r.StartsWith("DELETE") && r.Contains(run.Items[1].TransferId.ToString()));
     }
 
@@ -203,7 +218,7 @@ public class TransferRunnerTests
 
         Assert.True(run.Cancelled);
         Assert.True(_fake.SourceTransfers.Values.Single().Deleted);
-        Assert.False(run.Items[0].LeftoverSourceTransfer);
+        Assert.False(run.Items[0].SourceTransferExists);
     }
 
     [Fact]

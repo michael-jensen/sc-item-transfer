@@ -29,8 +29,8 @@ public sealed class ItemResult(JobItem item, Guid transferId)
     public ItemOutcome Outcome { get; set; } = ItemOutcome.Pending;
     public string? Error { get; set; }
 
-    public bool SourceTransferCreated { get; set; }
-    public bool SourceTransferDeleted { get; set; }
+    /// <summary>A transfer for this item may exist on the source: set before creating it, cleared once it's rejected or deleted.</summary>
+    public bool SourceTransferExists { get; set; }
 
     /// <summary>Creating the source transfer failed in a way that doesn't tell us whether it exists.</summary>
     public bool SourceTransferUncertain { get; set; }
@@ -53,8 +53,6 @@ public sealed class ItemResult(JobItem item, Guid transferId)
     public string? LoadTransferId { get; set; }
 
     public IEnumerable<string> LeftoverBlobs => Blobs.Where(b => !DeletedBlobs.Contains(b));
-
-    public bool LeftoverSourceTransfer => SourceTransferCreated && !SourceTransferDeleted;
 }
 
 public sealed class RunResult(IReadOnlyList<ItemResult> items, bool cancelled)
@@ -64,7 +62,7 @@ public sealed class RunResult(IReadOnlyList<ItemResult> items, bool cancelled)
 
     /// <summary>0 = all ok, 1 = failure or cancelled, 2 = finished but at least one item partial.</summary>
     public int ExitCode =>
-        Cancelled || Items.Any(i => i.Outcome is ItemOutcome.Failed or ItemOutcome.Skipped or ItemOutcome.Unknown or ItemOutcome.Pending) ? 1
+        Cancelled || Items.Any(i => i.Outcome is not (ItemOutcome.Ok or ItemOutcome.Partial)) ? 1
         : Items.Any(i => i.Outcome == ItemOutcome.Partial) ? 2
         : 0;
 }

@@ -127,6 +127,9 @@ public class ReportTests
 {
     private static readonly SitecoreEnvironment Dev = new("DEV", "dev.test", "id", "secret");
     private static readonly SitecoreEnvironment Sit = new("SIT", "sit.test", "id", "secret");
+    private readonly StringWriter _output = new();
+
+    private Ui Ui => new(_output, TextReader.Null, interactive: false, verbose: false, color: false);
 
     [Fact]
     public void Summary_explains_a_load_that_was_still_running_when_the_run_stopped()
@@ -138,11 +141,9 @@ public class ReportTests
             LoadTransferId = "consumed.20261002 010005 1.abc",
         };
         item.Blobs.Add("contentTransfer-a.raif");
-        var output = new StringWriter();
+        Report.Summary(new RunResult([item], cancelled: true), Dev, Sit, Ui);
 
-        Report.Summary(new RunResult([item], cancelled: true), Dev, Sit, new Ui(output, TextReader.Null, interactive: false, verbose: false, color: false));
-
-        var text = output.ToString();
+        var text = _output.ToString();
         Assert.Contains("UNKNOWN  /sitecore/content/Home", text);
         Assert.Contains("SIT was still loading contentTransfer-a.raif (load ID consumed.20261002 010005 1.abc)", text);
         Assert.Contains("contentTransfer-a.raif (wait for its load to finish before deleting it)", text);
@@ -161,11 +162,9 @@ public class ReportTests
             Outcome = ItemOutcome.Failed,
             Error = "DEV reported the export as Failed.",
         };
-        var output = new StringWriter();
+        Report.DryRun(new RunResult([ok, failed], cancelled: false), Dev, Sit, Ui);
 
-        Report.DryRun(new RunResult([ok, failed], cancelled: false), Dev, Sit, new Ui(output, TextReader.Null, interactive: false, verbose: false, color: false));
-
-        var lines = output.ToString().Split(Environment.NewLine);
+        var lines = _output.ToString().Split(Environment.NewLine);
         Assert.Contains("Dry run: nothing was written to SIT.", lines);
         Assert.Contains("  1046 item(s)  /sitecore/content/Home", lines);
         Assert.Contains("        FAILED  /sitecore/content/Typo", lines);

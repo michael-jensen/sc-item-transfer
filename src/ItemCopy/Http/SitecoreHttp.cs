@@ -73,7 +73,7 @@ public sealed class SitecoreHttp(HttpClient http, TokenProvider tokens, RetryPol
 
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
             {
-                tokens.Invalidate(env, token);
+                await tokens.InvalidateAsync(env, token);
                 if (replayable && !refreshed)
                 {
                     refreshed = true;
@@ -134,7 +134,7 @@ public sealed class SitecoreHttp(HttpClient http, TokenProvider tokens, RetryPol
     public static bool IsTransientStatus(HttpStatusCode status) =>
         status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)status >= 500;
 
-    private static bool IsTransientException(Exception ex, CancellationToken ct) =>
+    internal static bool IsTransientException(Exception ex, CancellationToken ct) =>
         ex is HttpRequestException or IOException
         || ex is TaskCanceledException && !ct.IsCancellationRequested; // HttpClient timeout
 

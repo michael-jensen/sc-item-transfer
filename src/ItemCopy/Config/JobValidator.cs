@@ -123,15 +123,14 @@ public static class JobValidator
     {
         for (var i = 0; i < items.Count; i++)
         {
-            var item = items[i];
-            if (item is { MergeStrategy: MergeStrategy.OverrideExistingTree, Scope: TransferScope.SingleItem })
+            var earlier = items[i];
+            if (earlier is { MergeStrategy: MergeStrategy.OverrideExistingTree, Scope: TransferScope.SingleItem })
             {
-                warnings.Add($"'{item.Path}' uses OverrideExistingTree with SingleItem: all of its existing descendants in the destination will be deleted and only the item itself copied.");
+                warnings.Add($"'{earlier.Path}' uses OverrideExistingTree with SingleItem: all of its existing descendants in the destination will be deleted and only the item itself copied.");
             }
 
             for (var j = i + 1; j < items.Count; j++)
             {
-                var earlier = items[i];
                 var later = items[j];
 
                 if (IsAncestor(later.Path, earlier.Path))

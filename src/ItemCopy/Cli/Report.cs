@@ -99,7 +99,7 @@ public static class Report
         var blobs = run.Items
             .SelectMany(r => r.LeftoverBlobs.Select(b => b == r.UnfinishedLoad ? $"{b} (wait for its load to finish before deleting it)" : b))
             .ToList();
-        var transfers = run.Items.Where(r => r.LeftoverSourceTransfer).ToList();
+        var transfers = run.Items.Where(r => r.SourceTransferExists).ToList();
         if (blobs.Count > 0 || transfers.Count > 0)
         {
             ui.Plain();

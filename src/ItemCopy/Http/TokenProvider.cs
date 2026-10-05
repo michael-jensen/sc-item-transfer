@@ -36,9 +36,9 @@ public sealed class TokenProvider(HttpClient http, string authUrl, string audien
     }
 
     /// <summary>Drops <paramref name="token"/> from the cache if it's still the current one, so the next call fetches a fresh token.</summary>
-    public void Invalidate(SitecoreEnvironment env, string token)
+    public async Task InvalidateAsync(SitecoreEnvironment env, string token)
     {
-        _lock.Wait();
+        await _lock.WaitAsync();
         try
         {
             if (_cache.TryGetValue(env.Name, out var cached) && cached.Token == token)
@@ -61,7 +61,7 @@ public sealed class TokenProvider(HttpClient http, string authUrl, string audien
                 using var request = BuildRequest(env);
                 response = await http.SendAsync(request, ct);
             }
-            catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+            catch (Exception ex) when (SitecoreHttp.IsTransientException(ex, ct))
             {
                 if (canRetry)
                 {

@@ -10,7 +10,7 @@ public sealed class RunnerSettings
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Maximum time for any single wait (export, blob ready, load).</summary>
-    public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(30);
+    public required TimeSpan Timeout { get; init; }
 
     /// <summary>How long to keep looking for the load's transfer ID after starting it.</summary>
     public TimeSpan TransferLookupTimeout { get; init; } = TimeSpan.FromMinutes(1);
@@ -32,16 +32,11 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 {
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(30);
 
-    public async Task<RunResult> RunAsync(Job job, SitecoreEnvironment source, SitecoreEnvironment destination, CancellationToken ct)
+    public Task<RunResult> RunAsync(Job job, SitecoreEnvironment source, SitecoreEnvironment destination, CancellationToken ct)
     {
-        var results = job.Items.Select(i => new ItemResult(i, settings.NewTransferId())).ToList();
-        var cancelled = false;
-
-        try
+        ui.Step($"Creating {job.Items.Count} transfer(s) on {source.Name}...");
+        return WithSourceTransfersAsync(job, source, async results =>
         {
-            ui.Step($"Creating {results.Count} transfer(s) on {source.Name}...");
-            await Task.WhenAll(results.Select(r => CreateSourceTransferAsync(r, job, source, ct)));
-
             for (var i = 0; i < results.Count; i++)
             {
                 var result = results[i];
@@ -56,49 +51,22 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                 {
-                    result.Outcome = ItemOutcome.Failed;
-                    result.Error = ex.Message;
-                }
-
-                if (result.Outcome == ItemOutcome.Failed)
-                {
-                    ui.Error($"{result.Item.Path}: {result.Error}");
+                    Fail(result, ex);
                     break;
                 }
             }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            cancelled = true;
-            ui.Warn("Cancelled.");
-            foreach (var result in results.Where(r => r.UnfinishedLoad is not null))
-                ui.Warn($"{destination.Name} had already started loading {result.UnfinishedLoad} into {job.Database} and will finish it. Cancelling doesn't stop a load.");
-        }
-        finally
-        {
-            await DeleteRemainingSourceTransfersAsync(results, source);
-        }
-
-        foreach (var result in results.Where(r => r.Outcome == ItemOutcome.Pending))
-            result.Outcome = result.UnfinishedLoad is null ? ItemOutcome.Skipped : ItemOutcome.Unknown;
-
-        return new RunResult(results, cancelled);
+        }, ct);
     }
 
     /// <summary>
     /// Dry run: exports every item from the source to check its path and count its items, then deletes
     /// the exports. Nothing is sent to the destination.
     /// </summary>
-    public async Task<RunResult> PreviewAsync(Job job, SitecoreEnvironment source, CancellationToken ct)
+    public Task<RunResult> PreviewAsync(Job job, SitecoreEnvironment source, CancellationToken ct)
     {
-        var results = job.Items.Select(i => new ItemResult(i, settings.NewTransferId())).ToList();
-        var cancelled = false;
-
-        try
+        ui.Step($"Exporting {job.Items.Count} item(s) from {source.Name} to count them...");
+        return WithSourceTransfersAsync(job, source, async results =>
         {
-            ui.Step($"Exporting {results.Count} item(s) from {source.Name} to count them...");
-            await Task.WhenAll(results.Select(r => CreateSourceTransferAsync(r, job, source, ct)));
-
             foreach (var result in results.Where(r => r.Outcome != ItemOutcome.Failed))
             {
                 ui.Plain();
@@ -111,17 +79,33 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                 {
-                    // Unlike a real run, keep going: the point is to report every path.
-                    result.Outcome = ItemOutcome.Failed;
-                    result.Error = ex.Message;
-                    ui.Error($"{result.Item.Path}: {ex.Message}");
+                    Fail(result, ex); // unlike a real run, keep going: the point is to report every path
                 }
             }
+        }, ct);
+    }
+
+    /// <summary>
+    /// Creates one source transfer per item, then runs <paramref name="process"/>. Whatever happens,
+    /// including Ctrl+C, deletes the transfers still on the source and marks items that never finished.
+    /// </summary>
+    private async Task<RunResult> WithSourceTransfersAsync(Job job, SitecoreEnvironment source, Func<List<ItemResult>, Task> process, CancellationToken ct)
+    {
+        var results = job.Items.Select(i => new ItemResult(i, settings.NewTransferId())).ToList();
+        var cancelled = false;
+
+        try
+        {
+            await Task.WhenAll(results.Select(r => CreateSourceTransferAsync(r, job, source, ct)));
+            await process(results);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             cancelled = true;
             ui.Warn("Cancelled.");
+            // Said now as well as in the summary: a second Ctrl+C during cleanup exits before the summary.
+            foreach (var result in results.Where(r => r.UnfinishedLoad is not null))
+                ui.Warn($"{job.Destination} had already started loading {result.UnfinishedLoad} into {job.Database} and will finish it. Cancelling doesn't stop a load.");
         }
         finally
         {
@@ -129,7 +113,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         }
 
         foreach (var result in results.Where(r => r.Outcome == ItemOutcome.Pending))
-            result.Outcome = ItemOutcome.Skipped;
+            result.Outcome = result.UnfinishedLoad is null ? ItemOutcome.Skipped : ItemOutcome.Unknown;
 
         return new RunResult(results, cancelled);
     }
@@ -137,7 +121,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
     private async Task CreateSourceTransferAsync(ItemResult result, Job job, SitecoreEnvironment source, CancellationToken ct)
     {
         // Until the source answers, assume the transfer may exist so cleanup (including after Ctrl+C) tries to delete it.
-        result.SourceTransferCreated = true;
+        result.SourceTransferExists = true;
         result.SourceTransferUncertain = true;
         try
         {
@@ -147,13 +131,17 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            // A 4xx means the source rejected it, so there's nothing to clean up.
-            if (ex is SitecoreApiException { StatusCode: { } status } && (int)status < 500)
-                result.SourceTransferCreated = result.SourceTransferUncertain = false;
-            result.Outcome = ItemOutcome.Failed;
-            result.Error = ex.Message;
-            ui.Error($"{result.Item.Path}: {ex.Message}");
+            if (ex is SitecoreApiException { IsRejected: true })
+                result.SourceTransferExists = result.SourceTransferUncertain = false;
+            Fail(result, ex);
         }
+    }
+
+    private void Fail(ItemResult result, Exception ex)
+    {
+        result.Outcome = ItemOutcome.Failed;
+        result.Error = ex.Message;
+        ui.Error($"{result.Item.Path}: {ex.Message}");
     }
 
     private async Task ProcessItemAsync(ItemResult result, Job job, SitecoreEnvironment source, SitecoreEnvironment destination, CancellationToken ct)
@@ -259,7 +247,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         {
             location = await items.StartConsumeAsync(destination, database, blob, ct);
         }
-        catch (SitecoreApiException ex) when (ex.StatusCode is { } status && (int)status < 500)
+        catch (SitecoreApiException ex) when (ex.IsRejected)
         {
             result.UnfinishedLoad = null; // refused, so nothing is loading
             throw;
@@ -283,9 +271,6 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 
             switch (t?.TransferState)
             {
-                case ItemTransferState.Finished:
-                    result.UnfinishedLoad = null;
-                    return t;
                 case ItemTransferState.Failed when retriedAt is null:
                     ui.Warn($"Loading {blob} failed{Describe(t)}; retrying once.");
                     await items.RetryAsync(destination, database, blob, ct);
@@ -299,16 +284,19 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
                         retryStarted = true;
                     }
                     return null;
-                case ItemTransferState.Failed:
-                    result.UnfinishedLoad = null;
-                    throw new InvalidOperationException($"Loading {blob} failed again after a retry{Describe(t)}.");
-                case ItemTransferState.Discarded:
-                    result.UnfinishedLoad = null;
-                    throw new InvalidOperationException($"Loading {blob} was discarded{Describe(t)}.");
+                case ItemTransferState.Finished or ItemTransferState.Failed or ItemTransferState.Discarded:
+                    return t;
                 default:
                     return null;
             }
         }, ct);
+
+        // The destination has stopped working on the load, one way or another.
+        result.UnfinishedLoad = null;
+        if (transfer.TransferState == ItemTransferState.Failed)
+            throw new InvalidOperationException($"Loading {blob} failed again after a retry{Describe(transfer)}.");
+        if (transfer.TransferState == ItemTransferState.Discarded)
+            throw new InvalidOperationException($"Loading {blob} was discarded{Describe(transfer)}.");
 
         result.TotalItems = (result.TotalItems ?? 0) + (transfer.TotalItemsCount ?? 0);
         result.TransferredItems = (result.TransferredItems ?? 0) + (transfer.TransferredItemsCount ?? 0);
@@ -338,7 +326,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 
     private async Task DeleteSourceTransferAsync(ItemResult result, SitecoreEnvironment source, CancellationToken ct)
     {
-        if (!result.SourceTransferCreated || result.SourceTransferDeleted)
+        if (!result.SourceTransferExists)
             return;
 
         try
@@ -346,7 +334,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(CleanupTimeout);
             await content.DeleteAsync(source, result.TransferId, timeout.Token);
-            result.SourceTransferDeleted = true;
+            result.SourceTransferExists = false;
             ui.Debug($"Deleted transfer {result.TransferId} on {source.Name}");
         }
         catch (Exception ex)
@@ -357,7 +345,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 
     private async Task DeleteRemainingSourceTransfersAsync(IEnumerable<ItemResult> results, SitecoreEnvironment source)
     {
-        var remaining = results.Where(r => r.LeftoverSourceTransfer).ToList();
+        var remaining = results.Where(r => r.SourceTransferExists).ToList();
         if (remaining.Count == 0)
             return;
 

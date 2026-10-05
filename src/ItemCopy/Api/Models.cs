@@ -24,7 +24,6 @@ public sealed record DataTree(string ItemPath, TransferScope Scope, MergeStrateg
 
 public static class ContentTransferState
 {
-    public const string Running = "Running";
     public const string Completed = "Completed";
     public const string Failed = "Failed";
     public const string NotFound = "NotFound";
@@ -53,8 +52,6 @@ public sealed class ChunkSetCompleteResponse
 public static class BlobState
 {
     public const string Uploaded = "Uploaded";
-    public const string Error = "Error";
-    public const string Discarded = "Discarded";
     public const string TransferredWithErrors = "TransferredWithErrors";
 
     /// <summary>States that mean the blob isn't ready yet but may become ready.</summary>
@@ -75,17 +72,14 @@ public sealed class BlobDetails
 {
     public string? BlobState { get; set; }
     public string? Error { get; set; }
-    public string? SourceName { get; set; }
 }
 
 public class ItemTransferStatus
 {
     public string? Id { get; set; }
     public string? SourceName { get; set; }
-    public string? DatabaseName { get; set; }
     public DateTimeOffset? ConsumedDate { get; set; }
     public string? TransferState { get; set; }
-    public string? Strategy { get; set; }
     public string? Description { get; set; }
 }
 
@@ -98,8 +92,6 @@ public sealed class ItemTransferDetails : ItemTransferStatus
 
 public sealed class ItemTransfersPage
 {
-    public int Page { get; set; }
-    public int PageSize { get; set; }
     public int TotalCount { get; set; }
     public List<ItemTransferStatus>? Transfers { get; set; }
 }
