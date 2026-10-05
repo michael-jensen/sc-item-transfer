@@ -150,6 +150,29 @@ public class ReportTests
     }
 
     [Fact]
+    public void Summary_explains_that_kept_items_are_not_counted_as_written()
+    {
+        var kept = new ItemResult(new JobItem("/sitecore/content/Home", TransferScope.ItemAndDescendants, MergeStrategy.KeepExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Ok,
+            TotalItems = 1046,
+            TransferredItems = 312,
+        };
+        var overridden = new ItemResult(new JobItem("/sitecore/content/Footer", TransferScope.SingleItem, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Ok,
+            TotalItems = 1,
+            TransferredItems = 1,
+        };
+
+        Report.Summary(new RunResult([kept, overridden], cancelled: false), Dev, Sit, Ui);
+
+        var lines = _output.ToString().Split(Environment.NewLine);
+        Assert.Contains("  OK       /sitecore/content/Home  (312/1046 item(s) written; existing items kept aren't counted)", lines);
+        Assert.Contains("  OK       /sitecore/content/Footer  (1/1 item(s) written)", lines);
+    }
+
+    [Fact]
     public void Dry_run_summary_lists_item_counts_and_failures()
     {
         var ok = new ItemResult(new JobItem("/sitecore/content/Home", TransferScope.ItemAndDescendants, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
@@ -169,5 +192,27 @@ public class ReportTests
         Assert.Contains("  1046 item(s)  /sitecore/content/Home", lines);
         Assert.Contains("        FAILED  /sitecore/content/Typo", lines);
         Assert.Contains("                DEV reported the export as Failed.", lines);
+    }
+
+    [Theory]
+    [InlineData(10, "about 1 min")]          // 2.5s
+    [InlineData(1046, "about 5 min")]        // 261.5s = 4.4 min
+    [InlineData(74060, "about 5 h 9 min")]   // 18515s = 308.6 min
+    public void Dry_run_estimates_how_long_the_load_will_take(int items, string estimate)
+    {
+        var first = new ItemResult(new JobItem("/sitecore/content/Home", TransferScope.ItemAndDescendants, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Ok,
+            TotalItems = items - 4,
+        };
+        var second = new ItemResult(new JobItem("/sitecore/content/Footer", TransferScope.SingleItem, MergeStrategy.OverrideExistingItem), Guid.NewGuid())
+        {
+            Outcome = ItemOutcome.Ok,
+            TotalItems = 4,
+        };
+
+        Report.DryRun(new RunResult([first, second], cancelled: false), Dev, Sit, Ui);
+
+        Assert.Contains($"Loading {items} item(s) will take {estimate}", _output.ToString());
     }
 }

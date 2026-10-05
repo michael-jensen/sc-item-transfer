@@ -35,7 +35,7 @@ public sealed record Options(
           --confirm-env <name>  Confirm a protected destination (e.g. PROD) without typing it.
           --dry-run             Check the job, both sets of credentials, and each path's item count, then stop.
           --env-file <path>     Use this .env file instead of ./.env or the one next to the executable.
-          --timeout <duration>  Maximum time for any single wait, e.g. 90s, 30m, 2h. Default 30m.
+          --timeout <duration>  Max wait for an export or .raif, or for a load to make progress, e.g. 90s, 30m, 2h. Default 30m.
           --verbose             Log every HTTP request.
 
         Job files: see jobs/job.example.json. Environments: see .env.example.

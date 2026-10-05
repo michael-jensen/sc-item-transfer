@@ -6,6 +6,9 @@ namespace ItemCopy.Cli;
 /// <summary>Prints the plan before a run and the summary after it.</summary>
 public static class Report
 {
+    /// <summary>Observed load speed on SitecoreAI (community measurements, 2026). Real speed varies.</summary>
+    private const double LoadItemsPerSecond = 4;
+
     public static void Plan(Job job, SitecoreEnvironment source, SitecoreEnvironment destination, bool destinationProtected, IReadOnlyList<string> warnings, Ui ui)
     {
         ui.Plain();
@@ -50,7 +53,7 @@ public static class Report
                 ItemOutcome.Unknown => ("UNKNOWN", Ui.Ansi.Yellow),
                 _ => ("SKIPPED", Ui.Ansi.Dim),
             };
-            var counts = result.TotalItems is { } total ? $"  ({result.TransferredItems ?? 0}/{total} items written)" : "";
+            var counts = Written(result) is { } written ? $"  ({written})" : "";
             ui.Plain($"  {label}  {result.Item.Path}{counts}", style);
 
             if (result.Error is not null)
@@ -91,7 +94,30 @@ public static class Report
                 ui.Plain($"  {"".PadLeft(width)}  {result.Error}", Ui.Ansi.Red);
         }
 
+        var total = run.Items.Sum(r => r.TotalItems ?? 0);
+        if (total > 0)
+        {
+            ui.Plain();
+            ui.Plain($"Loading {total} item(s) will take {EstimateLoad(total)} (at roughly {LoadItemsPerSecond} items/second; real speed varies).", Ui.Ansi.Dim);
+        }
+
         LeftBehind(run, source, destination, ui);
+    }
+
+    /// <summary>e.g. "312/1046 item(s) written", or null if nothing has loaded yet.</summary>
+    public static string? Written(ItemResult result)
+    {
+        if (result.TotalItems is not { } total)
+            return null;
+        // The destination doesn't count items that KeepExistingItem skipped, so a low count is expected there.
+        var note = result.Item.MergeStrategy == MergeStrategy.KeepExistingItem ? "; existing items kept aren't counted" : "";
+        return $"{result.TransferredItems ?? 0}/{total} item(s) written{note}";
+    }
+
+    private static string EstimateLoad(int items)
+    {
+        var minutes = Math.Max(1, (int)Math.Ceiling(items / LoadItemsPerSecond / 60));
+        return minutes < 60 ? $"about {minutes} min" : $"about {minutes / 60} h {minutes % 60} min";
     }
 
     private static void LeftBehind(RunResult run, SitecoreEnvironment source, SitecoreEnvironment destination, Ui ui)

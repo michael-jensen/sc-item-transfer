@@ -9,7 +9,7 @@ public sealed class RunnerSettings
 {
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(5);
 
-    /// <summary>Maximum time for any single wait (export, blob ready, load).</summary>
+    /// <summary>Maximum time for a wait (export, blob ready), or for a load to go without progress.</summary>
     public required TimeSpan Timeout { get; init; }
 
     /// <summary>How long to keep looking for the load's transfer ID after starting it.</summary>
@@ -25,8 +25,8 @@ public sealed class RunnerSettings
 }
 
 /// <summary>
-/// Runs a job: one content transfer per item, created up front in parallel, then each item is
-/// exported, copied, and loaded into the destination strictly in job order.
+/// Runs a job: one content transfer per item. Each item is exported, copied, and loaded into the
+/// destination strictly in job order, and its transfer is only created when its turn comes.
 /// </summary>
 public sealed class TransferRunner(ContentTransferClient content, ItemTransferClient items, Ui ui, RunnerSettings settings)
 {
@@ -34,17 +34,19 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 
     public Task<RunResult> RunAsync(Job job, SitecoreEnvironment source, SitecoreEnvironment destination, CancellationToken ct)
     {
-        ui.Step($"Creating {job.Items.Count} transfer(s) on {source.Name}...");
         return WithSourceTransfersAsync(job, source, async results =>
         {
             for (var i = 0; i < results.Count; i++)
             {
                 var result = results[i];
-                if (result.Outcome == ItemOutcome.Failed)
-                    break; // creation failed
-
                 ui.Plain();
                 ui.Step($"[{i + 1}/{results.Count}] {result.Item.Path} ({result.Item.Scope}, {result.Item.MergeStrategy})");
+
+                // Created only now: loads are slow, so a transfer created up front could sit on the source for hours.
+                await CreateSourceTransferAsync(result, job, source, ct);
+                if (result.Outcome == ItemOutcome.Failed)
+                    break;
+
                 try
                 {
                     await ProcessItemAsync(result, job, source, destination, ct);
@@ -67,13 +69,14 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         ui.Step($"Exporting {job.Items.Count} item(s) from {source.Name} to count them...");
         return WithSourceTransfersAsync(job, source, async results =>
         {
+            await Task.WhenAll(results.Select(r => CreateSourceTransferAsync(r, job, source, ct)));
             foreach (var result in results.Where(r => r.Outcome != ItemOutcome.Failed))
             {
                 ui.Plain();
                 ui.Step(result.Item.Path);
                 try
                 {
-                    var chunkSets = await WaitForExportAsync(result, source, ct);
+                    var chunkSets = await WaitForExportAsync(result, job, source, ct);
                     result.TotalItems = chunkSets.Sum(c => c.TotalItemCount);
                     result.Outcome = ItemOutcome.Ok;
                 }
@@ -86,7 +89,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
     }
 
     /// <summary>
-    /// Creates one source transfer per item, then runs <paramref name="process"/>. Whatever happens,
+    /// Runs <paramref name="process"/>, which creates the items' source transfers. Whatever happens,
     /// including Ctrl+C, deletes the transfers still on the source and marks items that never finished.
     /// </summary>
     private async Task<RunResult> WithSourceTransfersAsync(Job job, SitecoreEnvironment source, Func<List<ItemResult>, Task> process, CancellationToken ct)
@@ -96,7 +99,6 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
 
         try
         {
-            await Task.WhenAll(results.Select(r => CreateSourceTransferAsync(r, job, source, ct)));
             await process(results);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -148,7 +150,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
     {
         try
         {
-            var chunkSets = await WaitForExportAsync(result, source, ct);
+            var chunkSets = await WaitForExportAsync(result, job, source, ct);
             foreach (var chunkSet in chunkSets)
             {
                 await CopyChunkSetAsync(result, chunkSet, source, destination, ct);
@@ -167,27 +169,38 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         }
 
         result.Outcome = anyPartial ? ItemOutcome.Partial : ItemOutcome.Ok;
-        var counts = result.TotalItems is { } total ? $" {result.TransferredItems ?? 0}/{total} item(s) written." : "";
+        var counts = Report.Written(result) is { } written ? $" {written}." : "";
         if (anyPartial)
             ui.Warn($"{result.Item.Path}: loaded with validation errors.{counts}");
         else
             ui.Success($"{result.Item.Path}: done.{counts}");
     }
 
-    private async Task<IReadOnlyList<ChunkSetMetadata>> WaitForExportAsync(ItemResult result, SitecoreEnvironment source, CancellationToken ct)
+    private async Task<IReadOnlyList<ChunkSetMetadata>> WaitForExportAsync(ItemResult result, Job job, SitecoreEnvironment source, CancellationToken ct)
     {
         ui.Info($"Waiting for {source.Name} to prepare the export...");
         // Creation is accepted asynchronously, so briefly allow the transfer to be not-yet-registered.
         var notFoundDeadline = settings.Time.GetUtcNow() + settings.TransferLookupTimeout;
+        var recreated = false;
         var status = await PollAsync($"the export of {result.Item.Path} on {source.Name}", settings.Timeout, async () =>
         {
             var s = await content.GetStatusAsync(source, result.TransferId, ct);
+            var lost = s.State == ContentTransferState.NotFound && settings.Time.GetUtcNow() >= notFoundDeadline;
+            if (lost && !recreated)
+            {
+                // Known Sitecore bug CFW-9663: the source can lose a transfer a few minutes after creating it.
+                // Creating it again with the same ID is safe: it overwrites the transfer.
+                ui.Warn($"{source.Name} lost transfer {result.TransferId}; creating it again.");
+                await content.CreateAsync(source, result.TransferId, result.Item, job.Database, ct);
+                recreated = true;
+                notFoundDeadline = settings.Time.GetUtcNow() + settings.TransferLookupTimeout;
+                return null;
+            }
             return s.State switch
             {
                 ContentTransferState.Completed => s,
                 ContentTransferState.Failed => throw new InvalidOperationException($"{source.Name} reported the export as Failed. Check that the path exists in {source.Name}."),
-                ContentTransferState.NotFound when settings.Time.GetUtcNow() >= notFoundDeadline =>
-                    throw new InvalidOperationException($"{source.Name} has no transfer {result.TransferId} (NotFound)."),
+                _ when lost => throw new InvalidOperationException($"{source.Name} has no transfer {result.TransferId} (NotFound), even after creating it again."),
                 _ => null,
             };
         }, ct);
@@ -263,9 +276,12 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         // asynchronously or create a new transfer record.
         DateTimeOffset? retriedAt = null;
         var retryStarted = false;
+        int? written = null;
+        // A large load can take hours (roughly 4 items/second), so only give up once it stops making progress.
         var transfer = await PollAsync($"the load of {blob} on {destination.Name}", settings.Timeout, async () =>
         {
             var t = await items.GetTransferAsync(destination, transferId, ct);
+            written = t?.TransferredItemsCount ?? written;
             if (retriedAt is not null && t?.TransferState is { } state && state != ItemTransferState.Failed)
                 retryStarted = true;
 
@@ -289,7 +305,7 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
                 default:
                     return null;
             }
-        }, ct);
+        }, ct, progress: () => written);
 
         // The destination has stopped working on the load, one way or another.
         result.UnfinishedLoad = null;
@@ -353,17 +369,28 @@ public sealed class TransferRunner(ContentTransferClient content, ItemTransferCl
         await Task.WhenAll(remaining.Select(r => DeleteSourceTransferAsync(r, source, CancellationToken.None)));
     }
 
-    /// <summary>Calls <paramref name="poll"/> every poll interval until it returns non-null, it throws, or <paramref name="timeout"/> passes.</summary>
-    private async Task<T> PollAsync<T>(string what, TimeSpan timeout, Func<Task<T?>> poll, CancellationToken ct) where T : class
+    /// <summary>
+    /// Calls <paramref name="poll"/> every poll interval until it returns non-null, it throws, or <paramref name="timeout"/>
+    /// passes. With <paramref name="progress"/>, the timeout restarts whenever its value changes.
+    /// </summary>
+    private async Task<T> PollAsync<T>(string what, TimeSpan timeout, Func<Task<T?>> poll, CancellationToken ct, Func<int?>? progress = null) where T : class
     {
         var deadline = settings.Time.GetUtcNow() + timeout;
+        int? lastProgress = null;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             if (await poll() is { } value)
                 return value;
+            if (progress?.Invoke() is { } current && current != lastProgress)
+            {
+                lastProgress = current;
+                deadline = settings.Time.GetUtcNow() + timeout;
+            }
             if (settings.Time.GetUtcNow() >= deadline)
-                throw new TimeoutException($"Timed out after {timeout} waiting for {what}.");
+                throw new TimeoutException(progress is null
+                    ? $"Timed out after {timeout} waiting for {what}."
+                    : $"Timed out: {what} made no progress for {timeout}.");
             await settings.Delay(settings.PollInterval, ct);
         }
     }

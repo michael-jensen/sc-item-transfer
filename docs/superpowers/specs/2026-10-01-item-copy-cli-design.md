@@ -89,6 +89,11 @@ with the same IDs, or the item transfers but does not appear in the tree.
 DataTrees in one transfer the `.raif`→path mapping and ordering are unknown.
 This drives the one-transfer-per-path decision.
 
+**Field reports (community blogs, not official docs).** Loads write roughly 4
+items/second (1,718 items ≈ 7 min; 74,060 items took hours). Known bug
+CFW-9663: status can return "not found" about 3–5 minutes after a transfer is
+created; whether the transfer comes back is not stated.
+
 ## Configuration
 
 ### `.env`
@@ -182,8 +187,9 @@ item-copy run <job.json> [--yes] [--confirm-env <name>] [--dry-run]
 item-copy --help | --version
 ```
 
-- `--timeout`: max time for any single wait (source export, blob ready, item
-  load). Accepts `90s`, `30m`, `2h`. Default `30m`.
+- `--timeout`: max wait for a source export or a blob to be ready, and the
+  longest an item load may go without progress. Accepts `90s`, `30m`, `2h`.
+  Default `30m`.
 - `--verbose`: logs each HTTP method, URL, status, and duration. Never logs the
   `Authorization` header, secrets, or tokens.
 
@@ -194,9 +200,11 @@ item-copy --help | --version
    strategy. `OverrideExistingTree` rows are highlighted as destructive.
    Warnings follow the table.
 2. `--dry-run`: acquire a token for source and destination (verifies
-   credentials), then create a source transfer per item, wait for each export,
-   print each path's item count (or why it failed), and delete the transfers.
-   Nothing is sent to the destination. Exit 0 if every path exported, else 1.
+   credentials), then create a source transfer per item (all concurrently),
+   wait for each export, print each path's item count (or why it failed) and an
+   estimated load time for the total at 4 items/second, and delete the
+   transfers. Nothing is sent to the destination. Exit 0 if every path
+   exported, else 1.
 3. Destination not protected: prompt `Proceed? [y/N]` unless `--yes`.
 4. Destination protected: prompt `Type the destination environment name (PROD)
    to continue:`; must match case-insensitively. `--yes` alone does **not**
@@ -207,40 +215,49 @@ item-copy --help | --version
 
 Each job item becomes its own content transfer with its own new GUID.
 
-**Phase 1 — Create (parallel).** Get tokens for both environments (fail fast
-on bad credentials). Create one source transfer per item, all concurrently.
-A create rejected with a 4xx is known not to exist and is not cleaned up; a
-network error or 5xx may have created it, so cleanup tries to delete it and the
-summary marks it as possibly non-existent.
+Get tokens for both environments first (fail fast on bad credentials). Then,
+per item, in job order:
 
-**Phase 2 — Per item, in job order:**
-
-1. *Wait for export:* poll source status every 5s until `Completed`. `Failed` or
-   `NotFound` → item fails. Timeout → item fails.
-2. *Copy chunks:* for each chunk set (normally one), copy chunks `0..ChunkCount-1`
+1. *Create:* create the item's source transfer. It is created only when its
+   turn comes, because loads are slow (see field reports) and a transfer created
+   up front could wait on the source for hours. A create rejected with a 4xx is
+   known not to exist and is not cleaned up; a network error or 5xx may have
+   created it, so cleanup tries to delete it and the summary marks it as
+   possibly non-existent.
+2. *Wait for export:* poll source status every 5s until `Completed`. `Failed` →
+   item fails. `NotFound` is tolerated for 1 minute after creation; if it lasts
+   longer (CFW-9663), the transfer is created again with the same ID (which
+   overwrites it) and given another minute. `NotFound` after that → item fails.
+   Timeout → item fails.
+3. *Copy chunks:* for each chunk set (normally one), copy chunks `0..ChunkCount-1`
    with up to 4 concurrent copies. A copy = source GET (response headers read,
    body streamed) → destination PUT streaming the same body with
    `?isMedia={IsMedia}`. `IsMedia` missing from `Content-Disposition` → item
    fails (never guessed). `ItemsSkipped > 0` → warning with count.
-3. *Complete:* once all chunks of a set are saved, POST complete; record
+4. *Complete:* once all chunks of a set are saved, POST complete; record
    `ContentTransferFileName`.
-4. *Delete source transfer* (always attempted once chunks are downloaded or the
+5. *Delete source transfer* (always attempted once chunks are downloaded or the
    item has failed; failures here are warnings).
-5. *Wait for blob:* poll `GET /sources/blobs/{name}` every 5s until `Uploaded`.
+6. *Wait for blob:* poll `GET /sources/blobs/{name}` every 5s until `Uploaded`.
    `Error`/`Discarded` → item fails.
-6. *Consume:* POST consume with `blobName`; resolve the transfer ID (below).
-7. *Monitor:* poll `GET /transfers/{transferId}` every 5s.
+7. *Consume:* POST consume with `blobName`; resolve the transfer ID (below).
+8. *Monitor:* poll `GET /transfers/{transferId}` every 5s. The timeout restarts
+   whenever `TransferredItemsCount` changes, so a large load that keeps writing
+   items is waited for however long it takes; it times out only after
+   `--timeout` with no progress.
    - `Finished`: read blob state. If `ValidationErrors` is non-empty or blob is
      `TransferredWithErrors` → item **partial**: print errors, keep blob.
      Otherwise item **ok**: delete blob.
    - `Failed`: call retry once, continue polling. Second `Failed` → item fails;
      blob kept.
    - `Discarded` → item fails.
-8. Print item result: path, items transferred/total, outcome.
+9. Print item result: path, items transferred/total, outcome. With
+   `KeepExistingItem` the count notes that kept items aren't counted (the API
+   excludes items skipped by the merge strategy).
 
 **Failure policy.** A **failed** item stops the run: later items may depend on
-it. Already-created source transfers for not-yet-processed items are deleted.
-A **partial** item does not stop the run.
+it, and their source transfers are never created. A **partial** item does not
+stop the run.
 
 **Ctrl+C.** Cancels in-flight work, then best-effort deletes all source
 transfers this run created. Blobs already generated are listed in the summary.
@@ -299,7 +316,7 @@ src/ItemCopy/                      net10.0 console, AssemblyName=item-copy, no N
   Api/ItemTransferClient.cs        Item Transfer endpoints + ID resolution
   Api/ContentDisposition.cs        IsMedia / ItemsProcessed / ItemsSkipped parsing
   Api/Models.cs                    request/response DTOs
-  Pipeline/TransferRunner.cs       phases, failure policy, cleanup
+  Pipeline/TransferRunner.cs       per-item steps, failure policy, cleanup
   Pipeline/RunResult.cs            per-item results, summary, exit code
 tests/ItemCopy.Tests/              xUnit
 ```
@@ -327,7 +344,11 @@ Pipeline tests (fake handler emulating source, destination, and auth):
 - Transfer ID fallback: `GET /transfers/{last}` 404 → found via list.
 - Item `Failed` → retry → `Finished`.
 - `ValidationErrors` → partial, blob kept, exit code 2.
-- Item 1 fails → item 2 not consumed, its source transfer deleted, exit 1.
+- Item 1 fails → item 2 not consumed and its source transfer never created, exit 1.
+- Item 2's source transfer is created only after item 1 has loaded.
+- Source loses a transfer (`NotFound` past the grace period) → created again
+  once; lost again → item fails.
+- Load slower than `--timeout` but making progress → ok; no progress → times out.
 
 Live verification against real SitecoreAI is manual (no credentials in this
 environment): `--dry-run` first, then a single `SingleItem` job DEV→SIT.

@@ -33,6 +33,8 @@ public sealed class FakeSitecore : HttpMessageHandler
     public CancellationTokenSource? CancelAfterCreate { get; set; }
     /// <summary>Status polls per transfer that return 404 before it becomes visible.</summary>
     public int StatusNotFoundPolls { get; set; }
+    /// <summary>How many creates for a path the source loses: their status is 404 from then on (known bug CFW-9663).</summary>
+    public Dictionary<string, int> LostExports { get; } = [];
     public string ChunkContentType { get; set; } = "application/octet-stream";
     public List<string> ChunkAcceptHeaders { get; } = [];
     /// <summary>A retry leaves the failed record in place and creates a new transfer record.</summary>
@@ -47,6 +49,8 @@ public sealed class FakeSitecore : HttpMessageHandler
     public HashSet<string> RejectFirstRequestTo { get; } = [];
     /// <summary>Location header ends with the blob name (per the endpoint reference) instead of the transfer ID.</summary>
     public bool LocationIsBlobName { get; set; }
+    /// <summary>Load status polls before a load finishes, by item path; items written grow evenly until then. Default 1.</summary>
+    public Dictionary<string, int> LoadPolls { get; } = [];
     public HashSet<string> LoadFailsOnce { get; } = [];
     public HashSet<string> LoadAlwaysFails { get; } = [];
     public HashSet<string> LoadNeverFinishes { get; } = [];
@@ -74,6 +78,7 @@ public sealed class FakeSitecore : HttpMessageHandler
         public int ChunkCount { get; init; }
         public int StatusPolls { get; set; }
         public bool Deleted { get; set; }
+        public bool Lost { get; init; }
     }
 
     public sealed class Blob
@@ -157,7 +162,10 @@ public sealed class FakeSitecore : HttpMessageHandler
                 MergeStrategy = tree["MergeStrategy"]!.GetValue<string>(),
                 Database = json["Configuration"]!["Database"]!.GetValue<string>(),
                 ChunkCount = ChunkCounts.GetValueOrDefault(itemPath, 2),
+                Lost = LostExports.GetValueOrDefault(itemPath) > 0,
             };
+            if (SourceTransfers[id].Lost)
+                LostExports[itemPath]--;
             if (CancelAfterCreate is { } cts)
             {
                 CancelAfterCreate = null;
@@ -169,7 +177,7 @@ public sealed class FakeSitecore : HttpMessageHandler
 
         if (Match(path, $@"^{ContentPrefix}/([^/]+)/status$") is { } statusMatch)
         {
-            if (!SourceTransfers.TryGetValue(Guid.Parse(statusMatch[1]), out var t) || t.Deleted)
+            if (!SourceTransfers.TryGetValue(Guid.Parse(statusMatch[1]), out var t) || t.Deleted || t.Lost)
                 return Json(HttpStatusCode.NotFound, new { Error = "Transfer not found" });
 
             if (++t.StatusPolls <= StatusNotFoundPolls)
@@ -319,7 +327,8 @@ public sealed class FakeSitecore : HttpMessageHandler
             if (!ItemTransfers.TryGetValue(id, out var t))
                 return Json(HttpStatusCode.NotFound, new { Error = "Transfer not found" });
 
-            if (t.State == "InProgress" && ++t.Polls > 1 && !LoadNeverFinishes.Contains(t.Path))
+            var pollsToFinish = LoadPolls.GetValueOrDefault(t.Path, 1);
+            if (t.State == "InProgress" && ++t.Polls > pollsToFinish && !LoadNeverFinishes.Contains(t.Path))
             {
                 if (LoadFailsOnce.Contains(t.Path) && !t.Retried || LoadAlwaysFails.Contains(t.Path))
                 {
@@ -334,10 +343,13 @@ public sealed class FakeSitecore : HttpMessageHandler
 
             var total = SourceTransfers.Values.First(s => s.Path == t.Path).ChunkCount * 10;
             var errors = LoadValidationErrors.GetValueOrDefault(t.Path);
+            var written = t.State != "InProgress" ? total - (errors?.Count ?? 0)
+                : LoadNeverFinishes.Contains(t.Path) ? 0
+                : total * t.Polls / (pollsToFinish + 1);
             return Json(HttpStatusCode.OK, new
             {
                 t.Id, SourceName = t.BlobName, DatabaseName = "master", TransferState = t.State, Strategy = "OverrideExistingItem",
-                TotalItemsCount = total, TransferredItemsCount = total - (errors?.Count ?? 0), ValidationErrors = errors, SourcesCount = 1,
+                TotalItemsCount = total, TransferredItemsCount = written, ValidationErrors = errors, SourcesCount = 1,
             });
         }
 

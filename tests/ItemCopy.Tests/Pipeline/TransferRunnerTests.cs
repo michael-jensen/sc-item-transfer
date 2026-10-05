@@ -82,6 +82,17 @@ public class TransferRunnerTests
     }
 
     [Fact]
+    public async Task Creates_each_source_transfer_only_once_the_previous_item_has_loaded()
+    {
+        await RunAsync(Item(Home), Item(Media));
+
+        var creates = _fake.Requests.Index().Where(r => r.Item == $"POST {FakeSitecore.SourceHost} /sitecore/api/content/transfer/v1/transfers").Select(r => r.Index).ToList();
+        var firstLoad = _fake.Requests.FindIndex(r => r.StartsWith($"POST {FakeSitecore.DestinationHost} /sitecore/shell/api/v3/ItemsTransfer/transfers/databases/"));
+        Assert.Equal(2, creates.Count);
+        Assert.True(creates[1] > firstLoad, "The second item's transfer was created before the first item loaded.");
+    }
+
+    [Fact]
     public async Task Retries_a_chunk_after_transient_errors()
     {
         _fake.ChunkCounts[Home] = 1;
@@ -178,7 +189,7 @@ public class TransferRunnerTests
     }
 
     [Fact]
-    public async Task Failed_export_stops_the_run_and_cleans_up_later_transfers()
+    public async Task Failed_export_stops_the_run_before_later_transfers_are_created()
     {
         _fake.ExportFails.Add(Home);
 
@@ -189,7 +200,8 @@ public class TransferRunnerTests
         Assert.Contains("Failed", run.Items[0].Error);
         Assert.Empty(_fake.LoadOrder);
         Assert.Empty(_fake.SavedChunks);
-        Assert.All(_fake.SourceTransfers.Values, t => Assert.True(t.Deleted));
+        Assert.Equal(Home, _fake.SourceTransfers.Values.Single().Path);
+        Assert.True(_fake.SourceTransfers.Values.Single().Deleted);
         Assert.All(run.Items, r => Assert.False(r.SourceTransferExists));
     }
 
@@ -230,6 +242,33 @@ public class TransferRunnerTests
 
         Assert.Equal(0, run.ExitCode);
     }
+
+    [Fact]
+    public async Task Creates_a_transfer_again_when_the_source_loses_it()
+    {
+        _fake.LostExports[Home] = 1;
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Equal(2, CreateRequests());
+        Assert.Equal(run.Items[0].TransferId, _fake.SourceTransfers.Keys.Single());
+    }
+
+    [Fact]
+    public async Task Gives_up_when_the_source_loses_the_transfer_again()
+    {
+        _fake.LostExports[Home] = 2;
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(ItemOutcome.Failed, run.Items[0].Outcome);
+        Assert.Contains("NotFound", run.Items[0].Error);
+        Assert.Equal(2, CreateRequests());
+    }
+
+    private int CreateRequests() =>
+        _fake.Requests.Count(r => r == $"POST {FakeSitecore.SourceHost} /sitecore/api/content/transfer/v1/transfers");
 
     [Fact]
     public async Task Follows_a_retry_that_creates_a_new_load_transfer()
@@ -325,6 +364,17 @@ public class TransferRunnerTests
         Assert.Equal(ItemOutcome.Failed, run.Items[0].Outcome);
         Assert.Contains("Timed out", run.Items[0].Error);
         Assert.Equal(_fake.ItemTransfers.Values.Single().BlobName, run.Items[0].UnfinishedLoad);
+    }
+
+    [Fact]
+    public async Task Keeps_waiting_past_the_timeout_for_a_load_that_is_making_progress()
+    {
+        _fake.LoadPolls[Home] = 100; // about 8 minutes of 5s polls, against a 5 minute timeout
+
+        var run = await RunAsync(Item(Home));
+
+        Assert.Equal(ItemOutcome.Ok, run.Items[0].Outcome);
+        Assert.Equal(20, run.Items[0].TransferredItems);
     }
 
     [Fact]
