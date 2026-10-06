@@ -1,0 +1,95 @@
+name: Release
+
+# Pushing a version tag (git tag v0.2.0 && git push origin v0.2.0) builds, tests and publishes a
+# release. Running it from the Actions tab builds and tests only, and attaches the archives to the run.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    strategy:
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-24.04
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
+    # Build on the target architecture so the tests and the --version check run there too.
+    runs-on: ${{ matrix.runner }}
+    env:
+      RID: ${{ matrix.rid }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test
+        run: dotnet test
+
+      - name: Publish
+        run: |
+          args=(-c Release -r "$RID" --self-contained -p:PublishSingleFile=true
+                -p:EnableCompressionInSingleFile=true -o publish)
+          # The tag sets the version; other runs keep the csproj's 0.0.0-dev.
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            args+=("-p:Version=${GITHUB_REF_NAME#v}")
+          fi
+          dotnet publish src/ItemCopy "${args[@]}"
+
+      - name: Check the executable runs
+        run: |
+          actual=$(publish/item-copy --version)
+          echo "item-copy --version: $actual"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$actual" != "${GITHUB_REF_NAME#v}+"* ]]; then
+            echo "::error::Expected version ${GITHUB_REF_NAME#v}, got $actual"
+            exit 1
+          fi
+
+      # Archive before uploading: artifact uploads drop the executable bit.
+      - name: Package
+        run: tar -czf "item-copy-$RID.tar.gz" -C publish item-copy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: item-copy-${{ matrix.rid }}
+          path: item-copy-${{ matrix.rid }}.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  release:
+    name: Create release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: item-copy-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum item-copy-*.tar.gz > SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--title "$GITHUB_REF_NAME" --generate-notes --verify-tag)
+          # A tag with a suffix (v0.3.0-beta.1) is a pre-release, which releases/latest skips.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"

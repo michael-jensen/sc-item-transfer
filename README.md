@@ -15,10 +15,27 @@ It exports the items from the source, streams them to the destination, loads the
 destination database, and cleans up after itself. Transferred items are **not published**; they follow
 your normal publishing workflow.
 
-## Setup
+## Download
 
-Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download) to build (not needed to run a
-published executable, see [Publishing](#publishing)).
+Each [release](https://github.com/michael-jensen/sc-item-transfer/releases) has a self-contained
+executable for Linux x64 and Linux arm64 (including WSL), so .NET doesn't need to be installed. To
+install, or update to the latest release:
+
+```
+arch=$(uname -m | sed 's/x86_64/x64/; s/aarch64/arm64/')
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/michael-jensen/sc-item-transfer/releases/latest/download/item-copy-linux-$arch.tar.gz" | tar xz -C ~/.local/bin
+item-copy --version
+```
+
+If `item-copy` isn't found, open a new terminal so `~/.local/bin` is on your `PATH`. Each release also
+has a `SHA256SUMS` file for checking the downloads. Setup below uses `.env.example` and
+`jobs/job.example.json` from this repository.
+
+On other platforms, build from source with the [.NET 10 SDK](https://dotnet.microsoft.com/download)
+(see [Building an executable](#building-an-executable)).
+
+## Setup
 
 ### 1. Create automation credentials
 
@@ -183,9 +200,28 @@ check the destination.
 - If a run is interrupted, the summary lists anything left behind: `.raif` files on the destination
   or transfer IDs on the source. Don't delete a `.raif` while its load may still be running.
 
-## Publishing
+## Releasing
 
-Build a single self-contained executable that teammates can run without installing .NET:
+Push a version tag on `main`; the Release workflow tests, builds both Linux executables, and
+publishes them as a GitHub release:
+
+```
+git checkout main && git pull
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The tag sets the version, so that build's `item-copy --version` prints `0.2.0+<commit>`. Local builds
+report `0.0.0-dev`. A tag with a suffix, such as `v0.3.0-beta.1`, makes a pre-release, which
+`releases/latest` skips. If a release build fails, fix it and tag the next version rather than moving
+the tag.
+
+To try a build without releasing, run the Release workflow from the Actions tab; the archives are
+attached to the run for 3 days.
+
+### Building an executable
+
+Build a single self-contained executable that runs without installing .NET:
 
 ```
 dotnet publish src/ItemCopy -c Release -r win-x64   --self-contained -p:PublishSingleFile=true -o publish/win-x64
@@ -201,6 +237,8 @@ Put `.env` next to the executable, or run it from a directory containing `.env`.
 dotnet build
 dotnet test
 ```
+
+`main` is protected, so changes go through pull requests, and CI runs the tests on each one.
 
 ```
 src/ItemCopy/

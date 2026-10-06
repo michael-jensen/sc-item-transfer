@@ -1,0 +1,26 @@
+name: CI
+
+# main is protected and only changes through pull requests, so testing each PR covers it.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels that PR's run if it's still going.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - run: dotnet test
