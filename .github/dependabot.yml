@@ -1,0 +1,10 @@
+# Opens a pull request when the actions used in .github/workflows have new versions.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ['*']
