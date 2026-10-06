@@ -25,9 +25,9 @@ jobs:
     env:
       RID: ${{ matrix.rid }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
@@ -57,7 +57,7 @@ jobs:
       - name: Package
         run: tar -czf "item-copy-$RID.tar.gz" -C publish item-copy
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: item-copy-${{ matrix.rid }}
           path: item-copy-${{ matrix.rid }}.tar.gz
@@ -69,11 +69,11 @@ jobs:
     name: Create release
     needs: build
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: item-copy-*
           path: dist
