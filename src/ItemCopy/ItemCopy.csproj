@@ -7,7 +7,8 @@
     <Nullable>enable</Nullable>
     <AssemblyName>item-copy</AssemblyName>
     <RootNamespace>ItemCopy</RootNamespace>
-    <Version>0.1.0</Version>
+    <!-- Release builds take the version from the git tag; see .github/workflows/release.yml. -->
+    <Version>0.0.0-dev</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
